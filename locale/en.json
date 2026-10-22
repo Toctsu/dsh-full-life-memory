@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Full-Life Memory",
+    "description": "Keeps only token clues when context is dropped, and rebuilds a recollection on demand through the recall_from_clues tool."
+  }
+}

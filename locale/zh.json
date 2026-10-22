@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "终身记忆",
+    "description": "上下文放不下时只保留 token 线索；需要旧事时用 recall_from_clues 把线索重建成回忆，而不是检索原文。"
+  }
+}
