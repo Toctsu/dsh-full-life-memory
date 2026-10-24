@@ -8,7 +8,7 @@
 像人一样遗忘，也像人一样回忆。</p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-0.2.1-6d5efc?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.2.3-6d5efc?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-1fc8b3?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/node-%E2%89%A5%2024-339933?style=flat-square&logo=node.js&logoColor=white" alt="node" />
   <img src="https://img.shields.io/badge/dependencies-0-52525b?style=flat-square" alt="zero dependencies" />
@@ -86,6 +86,10 @@ plugin_manager { action: "install_bundle", target: "<本目录的绝对路径>" 
 
 - `recall_from_clues` 工具（Phase 1）
 - 自动遗忘钩子（Phase 2，默认开启）
+
+> **兼容性**：`@deepseek-ai/dsh-agent` / `dsh-tools` 声明为 `>=0.2.1-rc.2 <0.3.0`。
+> DSH 会把这两个 peer 依赖当作兼容版本要求；钉死小版本会在 DSH 升级后报“不兼容”，
+> 所以这里用区间，0.2.x 的补丁与 RC 升级都能直接通过。
 
 > 本插件是 **link 安装**：改完代码不用重装，但要重启 Host 才会重新加载模块。
 
