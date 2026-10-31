@@ -20,14 +20,29 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import z from '@deepseek-ai/schemastery'
 
 export const name = 'full-life-memory'
 
-/** tools 是硬依赖；tokenMeter / compaction / sessions 都按需 ctx.get()，装没装都能跑。 */
+/** tools 是硬依赖；tokenMeter / compaction / settings 都按需 ctx.get()，装没装都能跑。 */
 export const inject = ['tools']
 
+/**
+ * 可在设置界面里直接调整的参数。
+ * `.volatile()` 让 DSH 在保存时就地更新运行中的值（不用重启），设置页也按这份 schema 生成表单。
+ */
+export const Config = z.object({
+  dbPath: z.string().default('').volatile(),
+  limit: z.natural().min(1).max(20).default(5).volatile(),
+  maxPromptChars: z.natural().min(200).max(20000).default(1800).volatile(),
+  autoForget: z.boolean().default(true).volatile(),
+  forgetThresholdTokens: z.natural().min(500).max(200000).default(8000).volatile(),
+  forgetTurns: z.natural().min(1).max(10).default(2).volatile(),
+  keepCompletedTurns: z.natural().min(0).max(50).default(4).volatile(),
+})
+
 export interface Config {
-  /** SQLite 文件位置，默认 ~/.dsh/full-life-memory/memory.db */
+  /** SQLite 文件位置，默认 ~/.dsh/full-life-memory/memory.db；留空用默认 */
   dbPath?: string
   /** 一次回忆最多取回多少条线索，默认 5 */
   limit?: number
@@ -152,20 +167,50 @@ function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (char) => `\\${char}`)
 }
 
-function resolveConfig(config: Config | undefined): ResolvedConfig {
-  const limit = Number(config?.limit)
-  const maxPromptChars = Number(config?.maxPromptChars)
-  const threshold = Number(config?.forgetThresholdTokens)
-  const forgetTurns = Number(config?.forgetTurns)
-  const keepTurns = Number(config?.keepCompletedTurns)
+/** `.volatile()` 字段在运行期是 { get() } 引用；两种形态都接受。 */
+function liveValue<T>(value: unknown): T | undefined {
+  if (value !== null && typeof value === 'object' && typeof (value as { get?: unknown }).get === 'function') {
+    try {
+      return (value as { get(): T }).get()
+    } catch {
+      return undefined
+    }
+  }
+  return value as T | undefined
+}
+
+/** 每步重新读一次：volatile 字段保存后立即生效，不用重启。 */
+function currentConfig(ctx: PluginContext, fallback: Config | undefined): Config {
+  const source = (ctx as { config?: unknown }).config
+  const raw = source !== null && typeof source === 'object' ? (source as Record<string, unknown>) : undefined
+  if (raw === undefined) return fallback ?? {}
   return {
-    dbPath: config?.dbPath ? config.dbPath : DEFAULT_DB_PATH,
+    dbPath: liveValue<string>(raw.dbPath),
+    limit: liveValue<number>(raw.limit),
+    maxPromptChars: liveValue<number>(raw.maxPromptChars),
+    autoForget: liveValue<boolean>(raw.autoForget),
+    forgetThresholdTokens: liveValue<number>(raw.forgetThresholdTokens),
+    forgetTurns: liveValue<number>(raw.forgetTurns),
+    keepCompletedTurns: liveValue<number>(raw.keepCompletedTurns),
+  }
+}
+
+function resolveConfig(config: Config | undefined): ResolvedConfig {
+  const limit = Number(liveValue(config?.limit))
+  const maxPromptChars = Number(liveValue(config?.maxPromptChars))
+  const threshold = Number(liveValue(config?.forgetThresholdTokens))
+  const forgetTurns = Number(liveValue(config?.forgetTurns))
+  const keepTurns = Number(liveValue(config?.keepCompletedTurns))
+  const dbPath = liveValue<string>(config?.dbPath)
+  const autoForget = liveValue<boolean>(config?.autoForget)
+  return {
+    dbPath: dbPath ? dbPath : DEFAULT_DB_PATH,
     limit: Number.isInteger(limit) && limit > 0 ? Math.min(limit, 20) : DEFAULT_LIMIT,
     maxPromptChars:
       Number.isFinite(maxPromptChars) && maxPromptChars >= 200
         ? Math.floor(maxPromptChars)
         : DEFAULT_MAX_PROMPT_CHARS,
-    autoForget: config?.autoForget !== false,
+    autoForget: autoForget !== false,
     forgetThresholdTokens:
       Number.isFinite(threshold) && threshold >= 500 ? Math.floor(threshold) : DEFAULT_THRESHOLD_TOKENS,
     forgetTurns: Number.isInteger(forgetTurns) && forgetTurns >= 1 ? Math.min(forgetTurns, 10) : DEFAULT_FORGET_TURNS,
@@ -538,13 +583,15 @@ function createNoticeMessage(text: string, compactionId: string): Record<string,
  */
 export function installForgettingHook(
   ctx: PluginContext,
-  settings: ResolvedConfig,
-  connection: () => DatabaseSync,
+  readSettings: () => ResolvedConfig,
+  connection: (path: string) => DatabaseSync,
 ): void {
   let lastCutTurn = -1
 
   ctx.on('agent/pre-step', async (payload: any, next: () => Promise<unknown>) => {
     try {
+      const settings = readSettings()
+      if (!settings.autoForget) return await next()
       const session = payload?.agent?.session as SessionLike | undefined
       if (session === undefined) return await next()
       if (payload.signal?.aborted === true) return await next()
@@ -568,7 +615,7 @@ export function installForgettingHook(
       if (clue.seedTokens.length === 0) return await next()
 
       // 先落库：这一步失败就不开 compaction 事务，surface 保持原样。
-      storeClue(connection(), {
+      storeClue(connection(settings.dbPath), {
         sessionId: String((payload.agent as { id?: string } | undefined)?.id ?? session.id ?? ''),
         keywords: clue.keywords,
         seedTokens: clue.seedTokens,
@@ -621,11 +668,21 @@ export function installForgettingHook(
  * 而 defineTool 只是把简写 DSL 变成这个形状的辅助函数。
  */
 export function apply(ctx: PluginContext, config?: Config): void {
-  const settings = resolveConfig(config)
+  const readSettings = (): ResolvedConfig => resolveConfig(currentConfig(ctx, config))
 
   let db: DatabaseSync | undefined
-  const connection = (): DatabaseSync => {
-    if (db === undefined) db = openDb(settings.dbPath)
+  let openPath = ''
+  const connection = (path: string): DatabaseSync => {
+    const target = path === '' ? DEFAULT_DB_PATH : path
+    if (db === undefined || openPath !== target) {
+      try {
+        db?.close()
+      } catch {
+        /* 换库时旧句柄可能已被关闭 */
+      }
+      db = openDb(target)
+      openPath = target
+    }
     return db
   }
 
@@ -633,7 +690,20 @@ export function apply(ctx: PluginContext, config?: Config): void {
   ctx.effect(() => () => {
     db?.close()
     db = undefined
+    openPath = ''
   })
+
+  // 自带设置页：关掉 schema 的自动生成页面，避免和自定义页面重复。
+  try {
+    const injectChild = (ctx as { inject?: (deps: string[], callback: (child: unknown) => void) => unknown }).inject
+    if (typeof injectChild === 'function') {
+      injectChild.call(ctx, ['settings'], (child: any) => {
+        child.effect(() => child.settings.configure({ auto: false }))
+      })
+    }
+  } catch {
+    /* 没有 settings 服务时保持默认 */
+  }
 
   ctx.tools.register({
     name: 'recall_from_clues',
@@ -678,7 +748,8 @@ export function apply(ctx: PluginContext, config?: Config): void {
       const keyword = typeof raw === 'string' ? raw.trim() : ''
       if (keyword === '') throw new Error('recall_from_clues requires a non-empty keyword')
 
-      const clues = searchClues(connection(), keyword, settings.limit)
+      const settings = readSettings()
+      const clues = searchClues(connection(settings.dbPath), keyword, settings.limit)
       if (clues.length === 0) {
         return { found: false, keyword, count: 0, prompt: buildEmptyPrompt(keyword) }
       }
@@ -699,5 +770,6 @@ export function apply(ctx: PluginContext, config?: Config): void {
     },
   })
 
-  if (settings.autoForget) installForgettingHook(ctx, settings, connection)
+  // 钩子始终注册：开关每步从 readSettings() 读，设置页关掉后立即不再遗忘。
+  installForgettingHook(ctx, readSettings, connection)
 }

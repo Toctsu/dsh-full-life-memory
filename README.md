@@ -8,7 +8,7 @@
 像人一样遗忘，也像人一样回忆。</p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-0.2.3-6d5efc?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.3.0-6d5efc?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-1fc8b3?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/node-%E2%89%A5%2024-339933?style=flat-square&logo=node.js&logoColor=white" alt="node" />
   <img src="https://img.shields.io/badge/dependencies-0-52525b?style=flat-square" alt="zero dependencies" />
@@ -122,6 +122,24 @@ plugin_manager { action: "install_bundle", target: "<本目录的绝对路径>" 
 
 阈值比系统提示本身还低也没关系：保护规则会把会话稳稳停在「最近 5～6 轮」的滑动窗口，不会把上下文掏空。
 
+## 🛠 设置界面
+
+两个入口，同一张表单：
+
+- **Settings → 终身记忆**（独立设置页）
+- **Plugins → 已安装插件 → Full-Life Memory**（插件详情页的配置区，DSH 的插件配置约定位置）
+
+表单内容：
+
+- **触发阈值（tokens）**：到多少 token 开始折叠，默认 8000
+- **每次折叠轮数**：一次切掉几轮已完成对话，默认 2
+- **最近保留轮数**：无论压力多大都不动的最近轮次，默认 4
+- **自动折叠**：总开关，关掉后只保留手动回忆
+
+下方实时算出「什么时候会触发」：例如 `至少需要 6 个已完成轮次（折叠 2 轮 + 保留 4 轮）才会动手`，改数字时同步刷新。
+
+这些字段标了 `.volatile()`：保存后**下一轮就生效**，不用重启 Host；已经折叠掉的历史不会被恢复。
+
 ## 👀 你会看到什么
 
 对话流里多一行系统提示：
@@ -178,15 +196,17 @@ full-life-memory: folded 2 turn(s) (~9123 tokens) from surface seq 2..9
 
 ```text
 dsh-full-life-memory/
-├── package.json          # bundle 清单 + dsh.bundle.patch
+├── package.json          # bundle 清单 + dsh.bundle.patch + dsh.client
 ├── cordis.patch.yml      # 插入 Host 插件行 + 默认 config
-├── index.ts              # 源码（类型完整，改这里）
-├── index.js              # 运行时孪生版 = index.ts 去掉类型注解，Loader 加载它
+├── index.ts              # Host 源码（类型完整，改这里）
+├── index.js              # Host 运行时 = index.ts 编译产物
+├── client.js             # 浏览器半边：Plugins 页里的设置界面
 ├── locale/{en,zh}.json   # 插件管理器里的标题与描述
 ├── icon.svg
 └── test/
     ├── smoke.mjs         # Phase 1：命中 / 未命中 / 截断 / 转义 / 连接回收
-    └── auto-forget.mjs   # Phase 2：阈值 / 切除区间 / 配对校验 / 落库 / 每轮一次
+    ├── auto-forget.mjs   # Phase 2：阈值 / 切除区间 / 配对校验 / 落库 / 每轮一次
+    └── client-smoke.mjs  # 设置页：用假 slots/configForms 跑一遍渲染
 ```
 
 ## 🧪 测试
@@ -194,6 +214,7 @@ dsh-full-life-memory/
 ```bash
 node test/smoke.mjs
 node test/auto-forget.mjs
+node test/client-smoke.mjs
 ```
 
 `auto-forget.mjs` 用一个仿 `Session` 契约的假会话跑完整链路，并额外做一次 **`index.ts` 与 `index.js` 的行为对拍**：同一个场景分别执行，逐字段比较追加事件、被切的 surface 区间、落库的线索行，确保"编译产物"和源码不漂移。

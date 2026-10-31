@@ -1,6 +1,6 @@
 {
   "name": "@tuhengyu/dsh-full-life-memory",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "仿生终身记忆：上下文放不下时把旧轮次蒸馏成 token 线索并从历史切除，需要时用 recall_from_clues 把线索重建成回忆。",
   "keywords": [
     "dsh-plugin",
@@ -22,12 +22,14 @@
       "types": "./index.ts",
       "default": "./index.js"
     },
+    "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "files": [
     "index.js",
     "index.ts",
+    "client.js",
     "cordis.patch.yml",
     "tsconfig.json",
     "README.md",
@@ -37,6 +39,15 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
     }
   },
   "peerDependencies": {
@@ -58,5 +69,10 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/cosmokit": "~1.8.6",
+    "@deepseek-ai/schemastery": "3.18.5",
+    "@standard-schema/spec": "^1.1.0"
   }
 }
