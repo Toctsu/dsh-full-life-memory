@@ -8,7 +8,7 @@
 像人一样遗忘，也像人一样回忆。</p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-0.3.1-6d5efc?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.3.2-6d5efc?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-1fc8b3?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/node-%E2%89%A5%2024-339933?style=flat-square&logo=node.js&logoColor=white" alt="node" />
   <img src="https://img.shields.io/badge/dependencies-0-52525b?style=flat-square" alt="zero dependencies" />
@@ -108,6 +108,8 @@ plugin_manager { action: "install_bundle", target: "<本目录的绝对路径>" 
         forgetThresholdTokens: 8000                  # 超过多少 token 开始遗忘
         forgetTurns: 2                               # 每次切掉几轮已完成对话
         keepCompletedTurns: 4                        # 最近这么多轮永远保留
+
+        sceneOverrides: {}                           # 按场景覆盖，见下一节
 ```
 
 | 字段 | 默认 | 说明 |
@@ -119,8 +121,33 @@ plugin_manager { action: "install_bundle", target: "<本目录的绝对路径>" 
 | `forgetThresholdTokens` | `8000` | 用 `ctx.tokenMeter` 的口径；没有该服务时按字符粗估 |
 | `forgetTurns` | `2` | 一次折叠几轮 |
 | `keepCompletedTurns` | `4` | 保护最近对话：已完成轮数 ≥ `forgetTurns + keepCompletedTurns` 才动手 |
+| `sceneOverrides` | `{}` | 按场景覆盖，键是会话 `header.agentPreset` |
 
-阈值比系统提示本身还低也没关系：保护规则会把会话稳稳停在「最近 5～6 轮」的滑动窗口，不会把上下文掏空。
+## 🌐 多场景覆盖
+
+桌面端、QQ 群、QQ 私聊、微信……同一个模型在不同入口的"记忆压力"完全不同，所以除了全局默认，还可以按场景覆盖：
+
+```yaml
+autoForget: true
+forgetThresholdTokens: 8000   # 全局默认（桌面端）
+sceneOverrides:
+  qqbot:
+    enabled: true
+    forgetThresholdTokens: 4000   # 群聊碎片多，早点折叠
+    keepCompletedTurns: 1         # 只保最近 1 轮
+  wechat:
+    enabled: false                # 微信交给别的插件，本插件直接让路
+```
+
+**场景标识 = 会话的 `header.agentPreset`**（小写）。DSH 的 `SessionHeader` 没有单独的"渠道"字段，QQ/微信这类接入插件通常用自己的 agent 预设建会话，所以拿它当场景键最稳；没有预设时退回 `header.origin`，再退回 `default`。桌面端的默认预设通常是 `standard`，想给桌面单独一套规则就写 `standard:`。
+
+生效规则：
+
+- 场景里没写的字段**继承全局**
+- `enabled: false` 直接跳过折叠（连日志都不写）
+- 场景可以反向打开全局关闭的折叠——全局 `autoForget: false` 只影响没有场景覆盖的会话
+
+设置页的「场景」标签页可以增删改这些覆盖，不用手写 YAML。
 
 ## 🛠 设置界面
 
@@ -131,10 +158,8 @@ plugin_manager { action: "install_bundle", target: "<本目录的绝对路径>" 
 
 表单内容：
 
-- **触发阈值（tokens）**：到多少 token 开始折叠，默认 8000
-- **每次折叠轮数**：一次切掉几轮已完成对话，默认 2
-- **最近保留轮数**：无论压力多大都不动的最近轮次，默认 4
-- **自动折叠**：总开关，关掉后只保留手动回忆
+- **全局默认** 标签页：触发阈值、每次折叠轮数、最近保留轮数、自动折叠开关
+- **场景** 标签页：每个场景一张卡片（启用开关 + 三个数值 + 删除），底部输入场景标识即可新增
 
 下方实时算出「什么时候会触发」：例如 `至少需要 6 个已完成轮次（折叠 2 轮 + 保留 4 轮）才会动手`，改数字时同步刷新。
 

@@ -112,7 +112,9 @@ const text = flatten(page)
 assert.match(text, /threshold/, 'renders the threshold row')
 assert.match(text, /autoForget/, 'renders the auto-fold switch')
 assert.match(text, /checkUpdate/, 'renders the update check button')
-assert.match(text, /v0\.3\.1/, 'renders the running version')
+assert.match(text, /v0\.3\.2/, 'renders the running version')
+assert.match(text, /tabGlobal/, 'renders the global tab')
+assert.match(text, /tabScenes/, 'renders the scenes tab')
 
 const buttons = collect(page).filter((node) => node.type === 'button')
 assert.ok(buttons.some((node) => node.children.includes('checkUpdate')), 'update check is clickable')
@@ -138,12 +140,34 @@ assert.equal(requested, 'https://registry.npmjs.org/@tuhengyu%2Fdsh-full-life-me
 globalThis.fetch = async () => ({ ok: false, status: 503 })
 await checkButton.props.onClick()
 
+// 场景标签页：用 initialTab 直接渲染场景面板，校验列表与开关文案
+scope.getSnapshot = () => ({
+  value: {
+    forgetThresholdTokens: 12000,
+    forgetTurns: 3,
+    keepCompletedTurns: 5,
+    autoForget: true,
+    sceneOverrides: {
+      qqbot: { enabled: true, forgetThresholdTokens: 4000, keepCompletedTurns: 1 },
+      wechat: { enabled: false },
+    },
+  },
+  revision: 8,
+  writable: true,
+})
+const scenesPage = bundle.component({ view: 'page', initialTab: 'scenes', t: (key) => key, ...bundle.options.inject() })
+const scenesText = flatten(scenesPage)
+assert.match(scenesText, /qqbot/, 'lists the qqbot scene')
+assert.match(scenesText, /wechat/, 'lists the wechat scene')
+assert.match(scenesText, /sceneAdd/, 'offers the add-scene control')
+assert.match(scenesText, /sceneEnabled/, 'offers the per-scene enable switch')
+
 const summary = bundle.component({ view: 'summary', t: (key) => key })
 assert.ok(summary && typeof summary === 'string', 'summary view renders a one-liner')
 
 // 版本必须在三处一致：package.json / client.js 常量 / 渲染出来的版本号
 const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'))
 assert.match(text, new RegExp(`v${pkg.version.replace(/\./g, '\\.')}`), 'client version matches package.json')
-assert.equal(pkg.version, '0.3.1', 'bump client constant together with package.json')
+assert.equal(pkg.version, '0.3.2', 'bump client constant together with package.json')
 
 console.log('client-smoke: OK')

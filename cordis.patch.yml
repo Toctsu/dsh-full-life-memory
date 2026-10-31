@@ -17,3 +17,14 @@
         forgetTurns: 2
         # 无论压力多大，最近这么多轮永远保留
         keepCompletedTurns: 4
+
+        # 场景覆盖：键 = 会话 header.agentPreset（QQ / 微信等接入插件用它建会话）
+        # 只写需要覆盖的字段；没写的字段继承上面的全局值。
+        # 未匹配到的会话一律走全局默认。
+        sceneOverrides: {}
+        #   qqbot:
+        #     enabled: true
+        #     forgetThresholdTokens: 4000
+        #     keepCompletedTurns: 1
+        #   wechat:
+        #     enabled: false

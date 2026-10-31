@@ -23,7 +23,7 @@ const SYSTEM = { id: 'sys', role: 'system', content: [{ type: 'text', text: 'SYS
  * Build a session log. Each turn: user → assistant(tool-call) → tool/result → turn/end.
  * `brokenTurn` makes that turn's assistant message call two tools but only answer one.
  */
-function buildSession({ turns, toolPairs = 1, brokenTurn = -1, compactionOpen = false }) {
+function buildSession({ turns, toolPairs = 1, brokenTurn = -1, compactionOpen = false, header = undefined }) {
   const log = []
   const nodes = []
   const push = (type, data, extra) => {
@@ -82,6 +82,7 @@ function buildSession({ turns, toolPairs = 1, brokenTurn = -1, compactionOpen = 
 
   const session = {
     id: 'sess-1',
+    header: header ?? { agentPreset: 'standard' },
     get surface() { return { nodes: [...nodes] } },
     snapshotEvents() { return log },
     eventAt(seq) { return log[seq] },
@@ -278,6 +279,88 @@ try {
     await run(handlers, { agent: { id: 'sess-1', session }, turn: 8, step: 1, signal: { aborted: false } })
     assert.equal(session.surface.nodes.length, afterFirst, 'recent tail is protected')
     assert.equal(rows(dbPath).length, 1)
+  }
+
+  // ------------------------------------------------------ 场景覆盖：阈值
+  {
+    const session = buildSession({ turns: 7, header: { agentPreset: 'qqbot' } })
+    const before = session.surface.nodes.length
+    const { ctx, handlers } = fakeCtx(5000)
+    mod.apply(ctx, {
+      dbPath: dbPath + '.qq',
+      autoForget: true,
+      forgetThresholdTokens: 8000,
+      sceneOverrides: { qqbot: { forgetThresholdTokens: 4000 } },
+    })
+    await run(handlers, { agent: { id: 'sess-1', session }, turn: 7, step: 1, signal: { aborted: false } })
+    assert.equal(session.surface.nodes.length, before - 6 + 1, 'qqbot uses its 4000 threshold')
+
+    // 同样 5000 tokens，但没有场景覆盖（desktop）→ 不切
+    const plain = buildSession({ turns: 7, header: { agentPreset: 'standard' } })
+    const plainBefore = plain.surface.nodes.length
+    const second = fakeCtx(5000)
+    mod.apply(second.ctx, { dbPath: dbPath + '.plain', autoForget: true, forgetThresholdTokens: 8000 })
+    await run(second.handlers, { agent: { id: 'sess-1', session: plain }, turn: 7, step: 1, signal: { aborted: false } })
+    assert.equal(plain.surface.nodes.length, plainBefore, 'global 8000 still holds at 5000 tokens')
+  }
+
+  // ------------------------------------------------------ 场景覆盖：禁用
+  {
+    const session = buildSession({ turns: 7, header: { agentPreset: 'wechat' } })
+    const before = session.surface.nodes.length
+    const logBefore = session.snapshotEvents().length
+    const { ctx, handlers } = fakeCtx(9000)
+    mod.apply(ctx, {
+      dbPath: dbPath + '.wechat',
+      autoForget: true,
+      sceneOverrides: { wechat: { enabled: false } },
+    })
+    await run(handlers, { agent: { id: 'sess-1', session }, turn: 7, step: 1, signal: { aborted: false } })
+    assert.equal(session.surface.nodes.length, before, 'disabled scene skips folding entirely')
+    assert.equal(session.snapshotEvents().length, logBefore, 'disabled scene appends nothing')
+  }
+
+  // ------------------------------------------- 场景覆盖：更激进的保留策略
+  {
+    const session = buildSession({ turns: 4, header: { agentPreset: 'qqbot' } })
+    const before = session.surface.nodes.length
+    const { ctx, handlers } = fakeCtx(9000)
+    mod.apply(ctx, {
+      dbPath: dbPath + '.qq2',
+      autoForget: true,
+      forgetTurns: 2,
+      keepCompletedTurns: 4,
+      sceneOverrides: { qqbot: { keepCompletedTurns: 1 } },
+    })
+    await run(handlers, { agent: { id: 'sess-1', session }, turn: 4, step: 1, signal: { aborted: false } })
+    assert.equal(session.surface.nodes.length, before - 6 + 1, 'qqbot needs only 3 completed turns')
+
+    const plain = buildSession({ turns: 4, header: { agentPreset: 'standard' } })
+    const plainBefore = plain.surface.nodes.length
+    const second = fakeCtx(9000)
+    mod.apply(second.ctx, { dbPath: dbPath + '.plain2', autoForget: true, forgetTurns: 2, keepCompletedTurns: 4 })
+    await run(second.handlers, { agent: { id: 'sess-1', session: plain }, turn: 4, step: 1, signal: { aborted: false } })
+    assert.equal(plain.surface.nodes.length, plainBefore, 'default keeps 6 turns before acting')
+  }
+
+  // ------------------------------------------------------------ 场景识别
+  {
+    assert.equal(mod.sceneOf({ header: { agentPreset: 'QQBot' } }), 'qqbot', 'preset lowercased')
+    assert.equal(mod.sceneOf({ header: { origin: 'subagent' } }), 'subagent', 'falls back to origin')
+    assert.equal(mod.sceneOf({ header: {} }), 'default', 'falls back to default')
+    assert.equal(mod.sceneOf({}), 'default', 'missing header is default')
+
+    const merged = mod.resolveScene(
+      {
+        dbPath: 'x', limit: 5, maxPromptChars: 1800, autoForget: true,
+        forgetThresholdTokens: 8000, forgetTurns: 2, keepCompletedTurns: 4,
+        sceneOverrides: { qqbot: { forgetTurns: 1 } },
+      },
+      'qqbot',
+    )
+    assert.equal(merged.forgetTurns, 1, 'override wins')
+    assert.equal(merged.forgetThresholdTokens, 8000, 'unset fields inherit global')
+    assert.equal(merged.autoForget, true, 'enabled inherits global')
   }
 
   // -------------------------------------------------- 与 compaction 的锁互斥

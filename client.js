@@ -47,6 +47,18 @@ window.__ModuleLoader__.load({
       restartBody: '新版本 v{v} 已下载完成，请重启 DSH 以应用新版本。',
       restartNeeded: '已下载，重启后生效',
       ok: '知道了',
+      tabGlobal: '全局默认',
+      tabScenes: '场景',
+      sceneAdd: '添加场景',
+      scenePlaceholder: '场景标识，如 qqbot',
+      sceneEnabled: '在此场景启用记忆折叠',
+      sceneOn: '启用',
+      sceneOff: '已禁用',
+      sceneDelete: '删除',
+      sceneSave: '保存场景',
+      sceneInheritHint: '数值默认继承全局，改动后点保存',
+      sceneEmpty: '还没有场景覆盖。',
+      sceneHint: '场景标识 = 会话的 header.agentPreset（桌面默认预设通常是 standard；QQ / 微信等接入插件用各自的预设建会话）。未匹配的会话走全局默认。',
     }
 
     const en = {
@@ -82,6 +94,18 @@ window.__ModuleLoader__.load({
       restartBody: 'Version v{v} has been downloaded. Restart DSH to apply it.',
       restartNeeded: 'Downloaded — applies after restart',
       ok: 'Got it',
+      tabGlobal: 'Defaults',
+      tabScenes: 'Scenes',
+      sceneAdd: 'Add scene',
+      scenePlaceholder: 'Scene id, e.g. qqbot',
+      sceneEnabled: 'Enable folding in this scene',
+      sceneOn: 'enabled',
+      sceneOff: 'disabled',
+      sceneDelete: 'Remove',
+      sceneSave: 'Save scene',
+      sceneInheritHint: 'Values inherit the defaults until saved',
+      sceneEmpty: 'No scene overrides yet.',
+      sceneHint: 'A scene id is the session header.agentPreset (channel plugins such as QQ/WeChat create sessions with it); unmatched sessions use the defaults.',
     }
 
     const NUMBERS = [
@@ -192,7 +216,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 当前正在运行的版本（编译进浏览器模块；升级后需重启才会变）。 */
-    const CURRENT_VERSION = '0.3.1'
+    const CURRENT_VERSION = '0.3.2'
     const REGISTRY_URL = `https://registry.npmjs.org/${PKG.replace('/', '%2F')}/latest`
 
     function compareVersions(a, b) {
@@ -236,6 +260,138 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function Toggle(props) {
+      const checked = props.checked === true
+      return h(
+        'button',
+        {
+          type: 'button',
+          role: 'switch',
+          'aria-checked': checked ? 'true' : 'false',
+          disabled: props.disabled === true,
+          onClick: props.onChange,
+          style: {
+            width: 40,
+            height: 22,
+            borderRadius: 999,
+            border: `1px solid ${checked ? 'transparent' : color.borderStrong}`,
+            background: checked ? color.accent : 'transparent',
+            cursor: props.disabled === true ? 'default' : 'pointer',
+            padding: 0,
+            position: 'relative',
+            transition: 'background .15s ease',
+          },
+        },
+        h('span', {
+          style: {
+            position: 'absolute',
+            top: 2,
+            left: checked ? 20 : 2,
+            width: 16,
+            height: 16,
+            borderRadius: '50%',
+            background: checked ? '#ffffff' : color.muted,
+            transition: 'left .15s ease',
+          },
+        }),
+      )
+    }
+
+    function SceneCard(props) {
+      const { name, scene, globals, t } = props
+      const [draft, setDraft] = React.useState(null)
+      const base = {
+        enabled: scene.enabled !== false,
+        forgetThresholdTokens: numberOr(scene.forgetThresholdTokens, globals.forgetThresholdTokens),
+        forgetTurns: numberOr(scene.forgetTurns, globals.forgetTurns),
+        keepCompletedTurns: numberOr(scene.keepCompletedTurns, globals.keepCompletedTurns),
+      }
+      const current = draft || base
+      const changed = JSON.stringify(current) !== JSON.stringify(base)
+
+      const numberRow = (key, label, min, max, step) =>
+        h(
+          Field,
+          { label: t(label), hint: t('sceneInheritHint') },
+          h('input', {
+            type: 'number',
+            inputMode: 'numeric',
+            min,
+            max,
+            step,
+            value: String(current[key]),
+            onChange: (event) => {
+              const parsed = Number(event.target.value)
+              setDraft({ ...current, [key]: Number.isFinite(parsed) ? parsed : 0 })
+            },
+            style: inputStyle,
+          }),
+        )
+
+      return h(
+        'div',
+        {
+          style: {
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+            padding: 12,
+            borderRadius: 10,
+            border: `1px solid ${color.border}`,
+          },
+        },
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 } },
+          h(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+            h(
+              'span',
+              { style: { fontSize: 13, fontWeight: 600, fontFamily: 'ui-monospace, SFMono-Regular, monospace' } },
+              name,
+            ),
+            h(
+              'span',
+              { style: { fontSize: 11, color: current.enabled ? color.success : color.muted } },
+              current.enabled ? t('sceneOn') : t('sceneOff'),
+            ),
+          ),
+          h(
+            'button',
+            { type: 'button', onClick: () => props.onDelete(name), style: buttonStyle(false, false) },
+            t('sceneDelete'),
+          ),
+        ),
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
+          h('span', { style: { fontSize: 13 } }, t('sceneEnabled')),
+          h(Toggle, { checked: current.enabled, onChange: () => setDraft({ ...current, enabled: !current.enabled }) }),
+        ),
+        numberRow('forgetThresholdTokens', 'threshold', 500, 200000, 500),
+        numberRow('forgetTurns', 'forgetTurns', 1, 10, 1),
+        numberRow('keepCompletedTurns', 'keepTurns', 0, 50, 1),
+        h(
+          'div',
+          { style: { display: 'flex', gap: 8 } },
+          h(
+            'button',
+            {
+              type: 'button',
+              disabled: !changed,
+              onClick: () => {
+                props.onSave(name, current)
+                setDraft(null)
+              },
+              style: buttonStyle(true, !changed),
+            },
+            t('sceneSave'),
+          ),
+        ),
+      )
+    }
+
     function Card(props) {
       const t = props.t || ((key) => zh[key] || key)
       const controller = props.controller
@@ -245,6 +401,8 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [note, setNote] = React.useState(null)
       const [update, setUpdate] = React.useState({ status: 'idle' })
+      const [tab, setTab] = React.useState(props.initialTab === 'scenes' ? 'scenes' : 'global')
+      const [newScene, setNewScene] = React.useState('')
 
       React.useEffect(() => {
         if (!controller) return undefined
@@ -586,50 +744,151 @@ window.__ModuleLoader__.load({
             )
           : null
 
+      const scenes = value.sceneOverrides && typeof value.sceneOverrides === 'object' ? value.sceneOverrides : {}
+      const sceneNames = Object.keys(scenes).sort()
+
+      const saveScene = (name, next) => {
+        if (!controller || !writable) return
+        Promise.resolve(controller.write([{ op: 'set', path: ['sceneOverrides', name], value: next }], revision)).catch(
+          () => {},
+        )
+      }
+      const deleteScene = (name) => {
+        if (!controller || !writable) return
+        Promise.resolve(controller.write([{ op: 'unset', path: ['sceneOverrides', name] }], revision)).catch(() => {})
+      }
+      const addScene = () => {
+        const name = newScene.trim().toLowerCase()
+        if (name === '') return
+        saveScene(name, {
+          enabled: true,
+          forgetThresholdTokens: base.forgetThresholdTokens,
+          forgetTurns: base.forgetTurns,
+          keepCompletedTurns: base.keepCompletedTurns,
+        })
+        setNewScene('')
+        setTab('scenes')
+      }
+
+      const scenePanel = h(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+        sceneNames.length === 0
+          ? h('div', { style: { fontSize: 13, color: color.muted } }, t('sceneEmpty'))
+          : sceneNames.map((name) =>
+              h(SceneCard, {
+                key: name,
+                name,
+                scene: scenes[name] || {},
+                globals: base,
+                t,
+                onSave: saveScene,
+                onDelete: deleteScene,
+              }),
+            ),
+        h(
+          'div',
+          { style: { display: 'flex', gap: 8 } },
+          h('input', {
+            type: 'text',
+            value: newScene,
+            placeholder: t('scenePlaceholder'),
+            onChange: (event) => setNewScene(event.target.value),
+            onKeyDown: (event) => {
+              if (event.key === 'Enter') addScene()
+            },
+            style: { ...inputStyle, flex: 1 },
+          }),
+          h(
+            'button',
+            { type: 'button', onClick: addScene, disabled: !writable, style: buttonStyle(true, !writable) },
+            t('sceneAdd'),
+          ),
+        ),
+        h('div', { style: { fontSize: 12, lineHeight: 1.6, color: color.muted } }, t('sceneHint')),
+      )
+
+      const tabButton = (key, label) =>
+        h(
+          'button',
+          {
+            type: 'button',
+            onClick: () => setTab(key),
+            style: {
+              height: 30,
+              padding: '0 12px',
+              borderRadius: 8,
+              border: 'none',
+              cursor: 'pointer',
+              background: tab === key ? color.panel : 'transparent',
+              color: tab === key ? color.text : color.muted,
+              fontSize: 13,
+              fontWeight: tab === key ? 600 : 400,
+            },
+          },
+          label,
+        )
+
+      const tabBar = h(
+        'div',
+        { style: { display: 'flex', gap: 4, borderBottom: `1px solid ${color.border}`, paddingBottom: 6 } },
+        tabButton('global', t('tabGlobal')),
+        tabButton('scenes', sceneNames.length > 0 ? `${t('tabScenes')} · ${sceneNames.length}` : t('tabScenes')),
+      )
+
+      const saveRow = h(
+        'div',
+        { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+        h(
+          'button',
+          {
+            type: 'button',
+            disabled: busy || !writable || !changed,
+            onClick: commit,
+            style: buttonStyle(true, busy || !writable || !changed),
+          },
+          busy ? t('saving') : t('save'),
+        ),
+        changed
+          ? h(
+              'button',
+              { type: 'button', disabled: busy, onClick: () => setDraft(null), style: buttonStyle(false, busy) },
+              t('cancel'),
+            )
+          : null,
+        note
+          ? h(
+              'span',
+              {
+                style: {
+                  fontSize: 12,
+                  color: note.kind === 'error' ? color.danger : color.success,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                },
+              },
+              note.text,
+            )
+          : null,
+      )
+
+      const globalPanel = h(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', gap: 14 } },
+        facts,
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 14 } }, ...rows, switchRow),
+        saveRow,
+        h('div', { style: { fontSize: 12, lineHeight: 1.5, color: color.muted } }, t('scopeText')),
+      )
+
       return h(
         'div',
         { style: { display: 'flex', flexDirection: 'column', gap: 16, padding: '4px 0 8px' } },
         h('div', { style: { fontSize: 13, lineHeight: 1.6, color: color.muted } }, t('description')),
         versionPanel,
-        facts,
-        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 14 } }, ...rows, switchRow),
-        h(
-          'div',
-          { style: { display: 'flex', alignItems: 'center', gap: 10 } },
-          h(
-            'button',
-            {
-              type: 'button',
-              disabled: busy || !writable || !changed,
-              onClick: commit,
-              style: buttonStyle(true, busy || !writable || !changed),
-            },
-            busy ? t('saving') : t('save'),
-          ),
-          changed
-            ? h(
-                'button',
-                { type: 'button', disabled: busy, onClick: () => setDraft(null), style: buttonStyle(false, busy) },
-                t('cancel'),
-              )
-            : null,
-          note
-            ? h(
-                'span',
-                {
-                  style: {
-                    fontSize: 12,
-                    color: note.kind === 'error' ? color.danger : color.success,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  },
-                },
-                note.text,
-              )
-            : null,
-        ),
-        h('div', { style: { fontSize: 12, lineHeight: 1.5, color: color.muted } }, t('scopeText')),
+        tabBar,
+        tab === 'global' ? globalPanel : scenePanel,
         toast,
         modal,
       )

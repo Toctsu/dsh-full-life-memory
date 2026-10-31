@@ -24,6 +24,16 @@ export const name = 'full-life-memory';
 /** tools 是硬依赖；tokenMeter / compaction / settings 都按需 ctx.get()，装没装都能跑。 */
 export const inject = ['tools'];
 /**
+ * 场景覆盖：键是场景标识（会话 header.agentPreset，缺省时用 origin，最后回落到 default）。
+ * 只有写出来的字段才覆盖全局值。
+ */
+export const SceneSchema = z.object({
+    enabled: z.boolean().default(true),
+    forgetThresholdTokens: z.natural().min(500).max(200000),
+    forgetTurns: z.natural().min(1).max(10),
+    keepCompletedTurns: z.natural().min(0).max(50),
+});
+/**
  * 可在设置界面里直接调整的参数。
  * `.volatile()` 让 DSH 在保存时就地更新运行中的值（不用重启），设置页也按这份 schema 生成表单。
  */
@@ -35,6 +45,7 @@ export const Config = z.object({
     forgetThresholdTokens: z.natural().min(500).max(200000).default(8000).volatile(),
     forgetTurns: z.natural().min(1).max(10).default(2).volatile(),
     keepCompletedTurns: z.natural().min(0).max(50).default(4).volatile(),
+    sceneOverrides: z.dict(SceneSchema).default({}).volatile(),
 });
 const DEFAULT_DB_PATH = join(homedir(), '.dsh', 'full-life-memory', 'memory.db');
 const DEFAULT_LIMIT = 5;
@@ -88,6 +99,7 @@ function currentConfig(ctx, fallback) {
         forgetThresholdTokens: liveValue(raw.forgetThresholdTokens),
         forgetTurns: liveValue(raw.forgetTurns),
         keepCompletedTurns: liveValue(raw.keepCompletedTurns),
+        sceneOverrides: liveValue(raw.sceneOverrides),
     };
 }
 function resolveConfig(config) {
@@ -108,6 +120,59 @@ function resolveConfig(config) {
         forgetThresholdTokens: Number.isFinite(threshold) && threshold >= 500 ? Math.floor(threshold) : DEFAULT_THRESHOLD_TOKENS,
         forgetTurns: Number.isInteger(forgetTurns) && forgetTurns >= 1 ? Math.min(forgetTurns, 10) : DEFAULT_FORGET_TURNS,
         keepCompletedTurns: Number.isInteger(keepTurns) && keepTurns >= 0 ? Math.min(keepTurns, 50) : DEFAULT_KEEP_TURNS,
+        sceneOverrides: normalizeScenes(liveValue(config?.sceneOverrides)),
+    };
+}
+/** 把配置里的场景表整理成稳定的形状：键小写、数字裁剪到合法区间、未知键丢弃。 */
+function normalizeScenes(value) {
+    if (value === null || typeof value !== 'object')
+        return {};
+    const result = {};
+    for (const [rawKey, rawScene] of Object.entries(value)) {
+        const key = rawKey.trim().toLowerCase();
+        if (key === '' || rawScene === null || typeof rawScene !== 'object')
+            continue;
+        const scene = rawScene;
+        const entry = {};
+        if (typeof scene.enabled === 'boolean')
+            entry.enabled = scene.enabled;
+        const threshold = Number(liveValue(scene.forgetThresholdTokens));
+        if (Number.isFinite(threshold) && threshold >= 500)
+            entry.forgetThresholdTokens = Math.floor(Math.min(threshold, 200000));
+        const turns = Number(liveValue(scene.forgetTurns));
+        if (Number.isInteger(turns) && turns >= 1)
+            entry.forgetTurns = Math.min(turns, 10);
+        const keep = Number(liveValue(scene.keepCompletedTurns));
+        if (Number.isInteger(keep) && keep >= 0)
+            entry.keepCompletedTurns = Math.min(keep, 50);
+        result[key] = entry;
+    }
+    return result;
+}
+/**
+ * 当前会话属于哪个场景。
+ * DSH 的 SessionHeader 没有独立的渠道字段：外部接入（QQ/微信）通常以自己的 agent 预设建会话，
+ * 所以优先 agentPreset，其次 origin，最后 default。
+ */
+export function sceneOf(session) {
+    const header = session.header ?? {};
+    const preset = typeof header.agentPreset === 'string' ? header.agentPreset.trim().toLowerCase() : '';
+    if (preset !== '')
+        return preset;
+    const origin = typeof header.origin === 'string' ? header.origin.trim().toLowerCase() : '';
+    return origin !== '' ? origin : 'default';
+}
+/** 全局默认 + 场景覆盖后的生效值。场景没写的字段才回落到全局。 */
+export function resolveScene(settings, scene) {
+    const override = settings.sceneOverrides[scene];
+    if (override === undefined)
+        return settings;
+    return {
+        ...settings,
+        autoForget: override.enabled === undefined ? settings.autoForget : override.enabled,
+        forgetThresholdTokens: override.forgetThresholdTokens ?? settings.forgetThresholdTokens,
+        forgetTurns: override.forgetTurns ?? settings.forgetTurns,
+        keepCompletedTurns: override.keepCompletedTurns ?? settings.keepCompletedTurns,
     };
 }
 /** 打开（并按需创建）线索库；PRAGMA 放在这里，所有入口共享同一套设置。 */
@@ -464,10 +529,13 @@ export function installForgettingHook(ctx, readSettings, connection) {
     ctx.on('agent/pre-step', async (payload, next) => {
         try {
             const settings = readSettings();
-            if (!settings.autoForget)
-                return await next();
             const session = payload?.agent?.session;
             if (session === undefined)
+                return await next();
+            // 先认场景，再用「全局默认 + 场景覆盖」算出生效值
+            const scene = sceneOf(session);
+            const effective = resolveScene(settings, scene);
+            if (!effective.autoForget)
                 return await next();
             if (payload.signal?.aborted === true)
                 return await next();
@@ -475,12 +543,12 @@ export function installForgettingHook(ctx, readSettings, connection) {
             if (payload.turn === lastCutTurn)
                 return await next();
             const tokens = measureTokens(ctx, session);
-            if (tokens < settings.forgetThresholdTokens)
+            if (tokens < effective.forgetThresholdTokens)
                 return await next();
             const events = session.snapshotEvents();
             if (compactionActive(events))
                 return await next();
-            const span = selectForgettableSpan(session, settings, events);
+            const span = selectForgettableSpan(session, effective, events);
             if (span === null)
                 return await next();
             const texts = [];
@@ -522,7 +590,7 @@ export function installForgettingHook(ctx, readSettings, connection) {
                 session.append('compaction/end', { compactionId, turn: payload.turn });
             }
             lastCutTurn = payload.turn;
-            ctx.logger?.info?.(`full-life-memory: folded ${span.turns.length} turn(s) (~${tokens} tokens) ` +
+            ctx.logger?.info?.(`full-life-memory: folded ${span.turns.length} turn(s) (~${tokens} tokens) in scene "${scene}" ` +
                 `from surface seq ${span.startSeq}..${span.endSeq} as compaction ${compactionId}; clues: ${clue.keywords.join(', ')}`);
         }
         catch (error) {
