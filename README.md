@@ -8,7 +8,7 @@
 像人一样遗忘，也像人一样回忆。</p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-0.3.4-6d5efc?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.3.5-6d5efc?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-1fc8b3?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/node-%E2%89%A5%2024-339933?style=flat-square&logo=node.js&logoColor=white" alt="node" />
   <img src="https://img.shields.io/badge/dependencies-0-52525b?style=flat-square" alt="zero dependencies" />
@@ -156,16 +156,43 @@ sceneOverrides:
 - **Settings → 终身记忆**（独立设置页）
 - **Plugins → 已安装插件 → Full-Life Memory**（插件详情页的配置区，DSH 的插件配置约定位置）
 
-表单内容：
+选项用大白话，不再出现「阈值 / 折叠轮数」这类实现词：
 
-- **全局默认** 标签页：触发阈值、每次折叠轮数、最近保留轮数、自动折叠开关
-- **场景** 标签页：每个场景一张卡片（启用开关 + 三个数值 + 删除），底部输入场景标识即可新增
+| 控件 | 含义 |
+|---|---|
+| **遗忘触发条件** | 对话超过多少 token 时开始遗忘（调大记得更久） |
+| **遗忘会话轮数** | 一次遗忘几轮已经聊完的对话 |
+| **最近记忆保留轮数** | 最近这么多轮永远保留，方便接着聊 |
+| **自动遗忘** | 总开关 |
 
-下方实时算出「什么时候会触发」：例如 `至少需要 6 个已完成轮次（折叠 2 轮 + 保留 4 轮）才会动手`，改数字时同步刷新。
+分为两个标签页：
+
+- **全局默认**：上面那四项
+- **场景**：每个场景一张卡片（启用开关 + 三个数值 + 删除），底部输入场景标识即可新增
+
+下方实时算出「什么时候会触发」：例如 `至少要有 6 轮聊完的对话（遗忘 2 轮 + 保留 4 轮）才会开始`，改数字时同步刷新。
+
+### 🌍 多语言
+
+表单右上角有语言下拉框，选项来自 DSH 的语言服务（不是插件自己写死的列表），切换时调用 `ctx.locale.setLocale(id)`——也就是跟随全局偏好，插件不维护自己的语言状态。
+
+只带 `zh` / `en` 两套文案，加语言只要两步：
+
+```js
+// client.js
+const DICTS = { zh, en, ja }          // ① 补一份字典
+```
+
+```json
+// locale/ja.json（插件管理器里显示的名字）
+{ "meta": { "title": "フルライフ記憶", "description": "…" } }
+```
+
+不需要改 UI：下拉框会自己出现 `ja`（前提是宿主语言列表里有它，可用 `ctx.locale.addLanguage({ id, label, fallback })` 注册）。缺键会走宿主的 fallback 链，不会显示 undefined——`client-smoke` 里有一条断言专门检查所有字典键集合一致。
 
 ## 🔄 检查更新 / 一键更新
 
-表单上方有一行版本信息：`v0.3.1  [检查更新]`。
+表单上方有一行版本信息：`v0.3.5  [检查更新]`，最右侧是语言下拉框。
 
 | 状态 | 表现 |
 |---|---|

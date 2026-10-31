@@ -17,21 +17,22 @@ window.__ModuleLoader__.load({
 
     const zh = {
       title: '终身记忆',
-      summary: '达到阈值后把最旧的几轮折成线索并从历史切除。',
+      summary: '记忆快满时，自动遗忘最旧的对话，只留下线索。',
       description:
-        '上下文快满时，自动把最旧的几轮对话蒸馏成线索（关键词 + 残留片段）并从历史里物理切除；需要时再顺着线索回忆。',
-      threshold: '触发阈值（tokens）',
-      thresholdHint: '会话估算 token 超过这个值就开始折叠。调低会更早遗忘，调高会保留更多原文。',
-      forgetTurns: '每次折叠轮数',
-      forgetTurnsHint: '一次切掉最旧的几轮「已完成」对话。',
-      keepTurns: '最近保留轮数',
-      keepTurnsHint: '无论压力多大，最近这么多轮永远不动。',
-      autoForget: '自动折叠',
-      autoForgetHint: '关闭后历史不再被切除，只保留手动回忆。',
+        '当对话变得很长时，我会把最旧的几轮从上下文里移除，只留下几个关键词收进本地记忆；等你再提起，我再顺着线索把当时的情形回忆出来。',
+      language: '语言',
+      threshold: '遗忘触发条件',
+      thresholdHint: '对话估算超过这么多 token 时开始遗忘；调大记得更久，调小忘得更早。',
+      forgetTurns: '遗忘会话轮数',
+      forgetTurnsHint: '一次遗忘几轮已经聊完的对话。',
+      keepTurns: '最近记忆保留轮数',
+      keepTurnsHint: '最近这么多轮永远保留，不影响你接着刚才的话题聊。',
+      autoForget: '自动遗忘',
+      autoForgetHint: '关闭后不再自动遗忘，但仍可手动回忆。',
       condition: '什么时候会触发',
-      planText: '达到 {threshold} tokens 时，折叠最旧的 {forget} 轮，最近 {keep} 轮保留。',
-      conditionText: '至少需要 {n} 个已完成轮次（折叠 {f} 轮 + 保留 {k} 轮）才会动手；在此之前只观察不处理。',
-      scopeText: '改动只影响之后的新轮次；已经折叠的内容不会恢复。',
+      planText: '对话超过 {threshold} tokens 时，遗忘最旧的 {forget} 轮，最近 {keep} 轮始终保留。',
+      conditionText: '至少要有 {n} 轮聊完的对话（遗忘 {f} 轮 + 保留 {k} 轮）才会开始；在那之前只观察，不动手。',
+      scopeText: '改动只影响之后的对话；已经遗忘的内容不会恢复。',
       save: '保存',
       saving: '保存中…',
       saved: '已保存，下一步生效',
@@ -51,7 +52,7 @@ window.__ModuleLoader__.load({
       tabScenes: '场景',
       sceneAdd: '添加场景',
       scenePlaceholder: '场景标识，如 qqbot',
-      sceneEnabled: '在此场景启用记忆折叠',
+      sceneEnabled: '在此场景启用自动遗忘',
       sceneOn: '启用',
       sceneOff: '已禁用',
       sceneDelete: '删除',
@@ -63,22 +64,22 @@ window.__ModuleLoader__.load({
 
     const en = {
       title: 'Full-Life Memory',
-      summary: 'Folds the oldest turns into clues once the threshold is reached.',
+      summary: 'When a conversation gets long, the oldest turns are forgotten and only clues remain.',
       description:
-        'When the context is nearly full, the oldest turns are distilled into clues (keywords + leftover fragments) and physically removed from history. Recall rebuilds the scene later.',
-      threshold: 'Trigger threshold (tokens)',
-      thresholdHint: 'Start folding once the estimated session size passes this value.',
-      forgetTurns: 'Turns folded per run',
-      forgetTurnsHint: 'How many completed turns are cut at once.',
+        'When a conversation gets long, I remove the oldest turns from the context and keep just a few keywords in a local memory store. Ask about it later and I rebuild the scene from those clues.',
+      language: 'Language',
+      threshold: 'When forgetting starts (tokens)',
+      thresholdHint: 'Forgetting begins once the conversation passes this size. Larger keeps more context; smaller forgets sooner.',
+      forgetTurns: 'Turns forgotten each time',
+      forgetTurnsHint: 'How many finished turns are forgotten in one go.',
       keepTurns: 'Recent turns kept',
-      keepTurnsHint: 'The most recent turns are never touched, whatever the pressure.',
-      autoForget: 'Fold automatically',
-      autoForgetHint: 'Turn off to keep history intact and use manual recall only.',
-      condition: 'When it runs',
-      planText: 'At {threshold} tokens, fold the oldest {forget} turns and keep the last {keep}.',
-      conditionText:
-        'At least {n} completed turns are required (fold {f} + keep {k}); until then it only observes.',
-      scopeText: 'Changes apply to upcoming turns; already folded history stays folded.',
+      keepTurnsHint: 'The newest turns are never touched, so you can keep chatting where you left off.',
+      autoForget: 'Forget automatically',
+      autoForgetHint: 'Turn it off to stop automatic forgetting; manual recall still works.',
+      condition: 'When it kicks in',
+      planText: 'Past {threshold} tokens, the oldest {forget} turns are forgotten and the last {keep} stay.',
+      conditionText: 'At least {n} finished turns are needed (forget {f} + keep {k}); before that it only watches.',
+      scopeText: 'Changes apply to what comes next; anything already forgotten stays forgotten.',
       save: 'Save',
       saving: 'Saving…',
       saved: 'Saved — applies to the next step',
@@ -98,7 +99,7 @@ window.__ModuleLoader__.load({
       tabScenes: 'Scenes',
       sceneAdd: 'Add scene',
       scenePlaceholder: 'Scene id, e.g. qqbot',
-      sceneEnabled: 'Enable folding in this scene',
+      sceneEnabled: 'Enable automatic forgetting in this scene',
       sceneOn: 'enabled',
       sceneOff: 'disabled',
       sceneDelete: 'Remove',
@@ -107,6 +108,13 @@ window.__ModuleLoader__.load({
       sceneEmpty: 'No scene overrides yet.',
       sceneHint: 'A scene id is the session header.agentPreset (channel plugins such as QQ/WeChat create sessions with it); unmatched sessions use the defaults.',
     }
+
+    /**
+     * 语言包：加一种语言只需要在这里补一条，不需要改 UI。
+     * 用单语言注册表而不是“内置语言必须齐全”的批量表单，
+     * 这样以后新增 ja / ko 时不会因为缺少某一种而注册失败。
+     */
+    const DICTS = { zh, en }
 
     const NUMBERS = [
       { key: 'forgetThresholdTokens', min: 500, max: 200000, step: 500, label: 'threshold', hint: 'thresholdHint' },
@@ -216,7 +224,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 当前正在运行的版本（编译进浏览器模块；升级后需重启才会变）。 */
-    const CURRENT_VERSION = '0.3.4'
+    const CURRENT_VERSION = '0.3.5'
     const REGISTRY_URL = `https://registry.npmjs.org/${PKG.replace('/', '%2F')}/latest`
 
     function compareVersions(a, b) {
@@ -423,6 +431,28 @@ window.__ModuleLoader__.load({
         return () => clearTimeout(timer)
       }, [update.status])
 
+      // 跟随宿主语言：可用语言由 locale 服务给出，插件不维护自己的语言状态
+      const [localeSnapshot, setLocaleSnapshot] = React.useState(() => {
+        try {
+          const service = props.locale && props.locale()
+          return service ? service.getSnapshot() : undefined
+        } catch {
+          return undefined
+        }
+      })
+
+      React.useEffect(() => {
+        let service
+        try {
+          service = props.locale && props.locale()
+        } catch {
+          service = undefined
+        }
+        if (!service || typeof service.subscribe !== 'function') return undefined
+        setLocaleSnapshot(service.getSnapshot())
+        return service.subscribe(() => setLocaleSnapshot(service.getSnapshot()))
+      }, [props.locale])
+
       if (props.view === 'summary') return t('summary')
 
       if (!controller || !snapshot) {
@@ -628,6 +658,40 @@ window.__ModuleLoader__.load({
 
       const canCheck = update.status !== 'checking' && update.status !== 'updating'
 
+      const languageSelect =
+        localeSnapshot && Array.isArray(localeSnapshot.locales) && localeSnapshot.locales.length > 1
+          ? h(
+              'label',
+              { style: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 } },
+              h('span', null, t('language')),
+              h(
+                'select',
+                {
+                  value: localeSnapshot.active,
+                  'aria-label': t('language'),
+                  onChange: (event) => {
+                    try {
+                      const service = props.locale && props.locale()
+                      if (service && typeof service.setLocale === 'function') service.setLocale(event.target.value)
+                    } catch {
+                      /* 语言服务不可用时保持原样 */
+                    }
+                  },
+                  style: {
+                    height: 26,
+                    borderRadius: 6,
+                    border: `1px solid ${color.border}`,
+                    background: color.surface,
+                    color: color.text,
+                    fontSize: 12,
+                    padding: '0 6px',
+                  },
+                },
+                localeSnapshot.locales.map((entry) => h('option', { key: entry.id, value: entry.id }, entry.label)),
+              ),
+            )
+          : null
+
       const versionPanel = h(
         'div',
         {
@@ -667,6 +731,7 @@ window.__ModuleLoader__.load({
         update.status === 'error' && update.message
           ? h('span', { style: { color: color.danger, overflow: 'hidden', textOverflow: 'ellipsis' } }, update.message)
           : null,
+        languageSelect,
       )
 
       const toast =
@@ -896,7 +961,20 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       const t = ctx.locale.bind(NS)
-      ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'full-life-memory: dictionaries')
+
+      // 每种语言单独注册：以后加 ja / ko 只要往 DICTS 里补一条，不用动 UI
+      ctx.effect(() => {
+        const disposers = Object.entries(DICTS).map(([id, dict]) => ctx.locale.register(NS, id, dict))
+        return () => {
+          for (const dispose of disposers) {
+            try {
+              dispose()
+            } catch {
+              /* 已释放 */
+            }
+          }
+        }
+      }, 'full-life-memory: dictionaries')
 
       let controller
       try {
@@ -918,7 +996,7 @@ window.__ModuleLoader__.load({
                 order: 25,
                 label: () => t('title'),
                 locale: NS,
-                inject: () => ({ controller, remote: () => ctx.remote }),
+                inject: () => ({ controller, remote: () => ctx.remote, locale: () => ctx.locale }),
               },
               page,
             ),
@@ -935,7 +1013,7 @@ window.__ModuleLoader__.load({
                 name: 'plugins.bundle.config',
                 key: PKG,
                 locale: NS,
-                inject: () => ({ controller, remote: () => ctx.remote }),
+                inject: () => ({ controller, remote: () => ctx.remote, locale: () => ctx.locale }),
               },
               page,
             ),
@@ -944,6 +1022,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    return { inject: ['slots', 'locale', 'configForms'], apply }
+    return { inject: ['slots', 'locale', 'configForms'], apply, dicts: DICTS }
   },
 })

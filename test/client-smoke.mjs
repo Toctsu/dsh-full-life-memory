@@ -49,10 +49,23 @@ const scope = {
 }
 
 const registrations = []
+let switchedLocale = ''
 const ctx = {
   locale: {
     bind: () => (key) => key,
     register: () => () => {},
+    getSnapshot: () => ({
+      active: 'zh',
+      locales: [
+        { id: 'zh', label: '简体中文' },
+        { id: 'en', label: 'English' },
+      ],
+      revision: 1,
+    }),
+    subscribe: () => () => {},
+    setLocale: (id) => {
+      switchedLocale = id
+    },
   },
   configForms: { get: (ns) => (ns === 'full-life-memory' ? scope : undefined) },
   slots: {
@@ -71,6 +84,13 @@ const mod = captured.factory((name) => {
 })
 
 assert.deepEqual(mod.inject, ['slots', 'locale', 'configForms'])
+
+// 所有语言包的键必须一致，否则切换语言会出现 undefined
+const dictKeys = Object.entries(mod.dicts).map(([id, dict]) => [id, Object.keys(dict).sort()])
+for (const [id, keys] of dictKeys) {
+  assert.deepEqual(keys, dictKeys[0][1], `locale "${id}" must have the same keys as "${dictKeys[0][0]}"`)
+}
+assert.ok(Object.keys(mod.dicts).includes('zh') && Object.keys(mod.dicts).includes('en'))
 mod.apply(ctx)
 
 assert.equal(registrations.length, 2, 'settings section + bundle config page registered')
@@ -128,6 +148,15 @@ assert.match(text, /tabScenes/, 'renders the scenes tab')
 const buttons = collect(page).filter((node) => node.type === 'button')
 assert.ok(buttons.some((node) => node.children.includes('checkUpdate')), 'update check is clickable')
 assert.ok(buttons.some((node) => node.children.includes('save')), 'save button stays')
+
+// 语言切换：选项来自 locale 服务的 locales 列表，切换走 setLocale（不自己存语言状态）
+const selects = collect(page).filter((node) => node.type === 'select')
+assert.equal(selects.length, 1, 'renders a language switcher')
+const options = collect(selects[0]).filter((node) => node.type === 'option')
+assert.deepEqual(options.map((node) => node.props.value), ['zh', 'en'])
+assert.deepEqual(options.map((node) => flatten(node)), ['简体中文', 'English'])
+selects[0].props.onChange({ target: { value: 'en' } })
+assert.equal(switchedLocale, 'en', 'switching delegates to the host locale service')
 
 const inputs = collect(page).filter((node) => node.type === 'input')
 assert.ok(inputs.length >= 3, 'renders one input per number field')
