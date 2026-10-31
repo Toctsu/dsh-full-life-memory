@@ -38,6 +38,15 @@ window.__ModuleLoader__.load({
       cancel: '取消',
       unavailable: '插件当前未加载，配置暂时不可用。',
       readOnly: '本部署的设置是只读的。',
+      checkUpdate: '检查更新',
+      checking: '检查中…',
+      installNow: '立即更新',
+      updating: '下载中…',
+      upToDate: '当前已是最新版本',
+      restartTitle: '更新已下载',
+      restartBody: '新版本 v{v} 已下载完成，请重启 DSH 以应用新版本。',
+      restartNeeded: '已下载，重启后生效',
+      ok: '知道了',
     }
 
     const en = {
@@ -64,6 +73,15 @@ window.__ModuleLoader__.load({
       cancel: 'Cancel',
       unavailable: 'This plugin is not loaded, so it cannot be configured right now.',
       readOnly: 'This deployment stores settings read-only.',
+      checkUpdate: 'Check for updates',
+      checking: 'Checking…',
+      installNow: 'Update now',
+      updating: 'Downloading…',
+      upToDate: 'You are on the latest version',
+      restartTitle: 'Update downloaded',
+      restartBody: 'Version v{v} has been downloaded. Restart DSH to apply it.',
+      restartNeeded: 'Downloaded — applies after restart',
+      ok: 'Got it',
     }
 
     const NUMBERS = [
@@ -173,6 +191,41 @@ window.__ModuleLoader__.load({
       return Number.isFinite(parsed) ? parsed : fallback
     }
 
+    /** 当前正在运行的版本（编译进浏览器模块；升级后需重启才会变）。 */
+    const CURRENT_VERSION = '0.3.1'
+    const REGISTRY_URL = `https://registry.npmjs.org/${PKG.replace('/', '%2F')}/latest`
+
+    function compareVersions(a, b) {
+      const parse = (value) =>
+        String(value || '')
+          .replace(/^v/i, '')
+          .split('+')[0]
+          .split('-')[0]
+          .split('.')
+          .map((part) => Number(part) || 0)
+      const left = parse(a)
+      const right = parse(b)
+      for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+        const x = left[index] || 0
+        const y = right[index] || 0
+        if (x !== y) return x > y ? 1 : -1
+      }
+      return 0
+    }
+
+    /** Remote 调用返回 { ok, value } / { ok:false, error }；这里统一抛错或取值。 */
+    function remoteValue(result) {
+      if (result && typeof result === 'object' && 'ok' in result) {
+        if (!result.ok) {
+          const error = result.error
+          const message = error && (error.message || error.code) ? error.message || error.code : 'Remote 调用失败'
+          throw new Error(message)
+        }
+        return result.value
+      }
+      return result
+    }
+
     function Field(props) {
       return h(
         'label',
@@ -191,6 +244,7 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
       const [note, setNote] = React.useState(null)
+      const [update, setUpdate] = React.useState({ status: 'idle' })
 
       React.useEffect(() => {
         if (!controller) return undefined
@@ -203,6 +257,13 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         setDraft(null)
       }, [revision])
+
+      // “已是最新版本”的轻提示自动消失
+      React.useEffect(() => {
+        if (update.status !== 'latest') return undefined
+        const timer = setTimeout(() => setUpdate({ status: 'idle' }), 2600)
+        return () => clearTimeout(timer)
+      }, [update.status])
 
       if (props.view === 'summary') return t('summary')
 
@@ -227,6 +288,61 @@ window.__ModuleLoader__.load({
         current.autoForget !== base.autoForget
 
       const edit = (key, next) => setDraft({ ...current, [key]: next })
+
+      const remote = () => (typeof props.remote === 'function' ? props.remote() : props.remote)
+
+      const checkUpdate = async () => {
+        setUpdate({ status: 'checking' })
+        try {
+          let latest = ''
+          try {
+            const response = await fetch(REGISTRY_URL, { cache: 'no-store', headers: { accept: 'application/json' } })
+            if (!response.ok) throw new Error(`registry HTTP ${response.status}`)
+            const payload = await response.json()
+            latest = payload && payload.version ? String(payload.version) : ''
+            if (latest === '') throw new Error('registry 未返回 version')
+          } catch (directError) {
+            // 浏览器被 CORS / CSP 拦住时，用 Host 的 pluginManager 代查
+            latest = await inspectLatest(directError)
+          }
+          setUpdate(
+            compareVersions(latest, CURRENT_VERSION) > 0
+              ? { status: 'available', latest }
+              : { status: 'latest', latest },
+          )
+        } catch (error) {
+          setUpdate({ status: 'error', message: error && error.message ? error.message : String(error) })
+        }
+      }
+
+      const inspectLatest = async (directError) => {
+        const remotes = remote()
+        const manager = remotes && remotes.pluginManager
+        if (!manager || typeof manager.inspect !== 'function') throw directError
+        const value = remoteValue(await manager.inspect(PKG))
+        if (value && value.status === 'accepted' && value.version) return String(value.version)
+        throw directError
+      }
+
+      const installUpdate = async () => {
+        const latest = update.latest || ''
+        setUpdate({ status: 'updating', latest })
+        try {
+          const remotes = remote()
+          const manager = remotes && remotes.pluginManager
+          if (!manager || typeof manager.installBundle !== 'function') {
+            throw new Error('当前 DSH 未开放 pluginManager，请在终端执行 pnpm add')
+          }
+          const result = remoteValue(await manager.installBundle(PKG, { registry: null }))
+          if (result && result.error) throw new Error(result.error.diagnostic || result.error.code || '安装失败')
+          if (result && result.application === 'failed') {
+            throw new Error((result.packageResult && result.packageResult.output) || '安装失败')
+          }
+          setUpdate({ status: 'restart', latest: (result && result.version) || latest })
+        } catch (error) {
+          setUpdate({ status: 'error', message: error && error.message ? error.message : String(error) })
+        }
+      }
 
       const commit = async () => {
         setBusy(true)
@@ -352,10 +468,129 @@ window.__ModuleLoader__.load({
         ),
       )
 
+      const canCheck = update.status !== 'checking' && update.status !== 'updating'
+
+      const versionPanel = h(
+        'div',
+        {
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            flexWrap: 'wrap',
+            padding: '10px 12px',
+            borderRadius: 10,
+            border: `1px solid ${color.border}`,
+            fontSize: 12,
+            color: color.muted,
+          },
+        },
+        h('span', null, `v${CURRENT_VERSION}`),
+        update.status === 'available' && update.latest
+          ? h('span', { style: { color: color.text } }, `→ v${update.latest}`)
+          : null,
+        update.status === 'restart' && update.latest
+          ? h('span', { style: { color: color.success } }, `→ v${update.latest}`)
+          : null,
+        h(
+          'button',
+          { type: 'button', disabled: !canCheck, onClick: checkUpdate, style: buttonStyle(false, !canCheck) },
+          update.status === 'checking' ? t('checking') : t('checkUpdate'),
+        ),
+        update.status === 'available'
+          ? h(
+              'button',
+              { type: 'button', onClick: installUpdate, style: buttonStyle(true, false) },
+              t('installNow'),
+            )
+          : null,
+        update.status === 'updating' ? h('span', null, t('updating')) : null,
+        update.status === 'restart' ? h('span', { style: { color: color.success } }, t('restartNeeded')) : null,
+        update.status === 'error' && update.message
+          ? h('span', { style: { color: color.danger, overflow: 'hidden', textOverflow: 'ellipsis' } }, update.message)
+          : null,
+      )
+
+      const toast =
+        update.status === 'latest'
+          ? h(
+              'div',
+              {
+                style: {
+                  position: 'fixed',
+                  top: 24,
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  zIndex: 1000,
+                  padding: '8px 16px',
+                  borderRadius: 999,
+                  background: color.text,
+                  color: color.surface,
+                  fontSize: 12,
+                  boxShadow: '0 8px 28px rgba(0,0,0,.22)',
+                },
+              },
+              t('upToDate'),
+            )
+          : null
+
+      const modal =
+        update.status === 'restart'
+          ? h(
+              'div',
+              {
+                style: {
+                  position: 'fixed',
+                  inset: 0,
+                  zIndex: 1001,
+                  background: 'rgba(0,0,0,.45)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: 24,
+                },
+              },
+              h(
+                'div',
+                {
+                  style: {
+                    width: 440,
+                    maxWidth: '100%',
+                    borderRadius: 14,
+                    background: color.surface,
+                    color: color.text,
+                    border: `1px solid ${color.border}`,
+                    boxShadow: '0 24px 64px rgba(0,0,0,.32)',
+                    padding: 20,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 12,
+                  },
+                },
+                h('div', { style: { fontSize: 15, fontWeight: 600 } }, t('restartTitle')),
+                h(
+                  'div',
+                  { style: { fontSize: 13, lineHeight: 1.7, color: color.muted } },
+                  t('restartBody').replace('{v}', String(update.latest || '')),
+                ),
+                h(
+                  'div',
+                  { style: { display: 'flex', justifyContent: 'flex-end' } },
+                  h(
+                    'button',
+                    { type: 'button', onClick: () => setUpdate({ status: 'idle' }), style: buttonStyle(true, false) },
+                    t('ok'),
+                  ),
+                ),
+              ),
+            )
+          : null
+
       return h(
         'div',
         { style: { display: 'flex', flexDirection: 'column', gap: 16, padding: '4px 0 8px' } },
         h('div', { style: { fontSize: 13, lineHeight: 1.6, color: color.muted } }, t('description')),
+        versionPanel,
         facts,
         h('div', { style: { display: 'flex', flexDirection: 'column', gap: 14 } }, ...rows, switchRow),
         h(
@@ -395,6 +630,8 @@ window.__ModuleLoader__.load({
             : null,
         ),
         h('div', { style: { fontSize: 12, lineHeight: 1.5, color: color.muted } }, t('scopeText')),
+        toast,
+        modal,
       )
     }
 
@@ -422,7 +659,7 @@ window.__ModuleLoader__.load({
                 order: 25,
                 label: () => t('title'),
                 locale: NS,
-                inject: () => ({ controller }),
+                inject: () => ({ controller, remote: () => ctx.remote }),
               },
               page,
             ),
@@ -439,7 +676,7 @@ window.__ModuleLoader__.load({
                 name: 'plugins.bundle.config',
                 key: PKG,
                 locale: NS,
-                inject: () => ({ controller }),
+                inject: () => ({ controller, remote: () => ctx.remote }),
               },
               page,
             ),

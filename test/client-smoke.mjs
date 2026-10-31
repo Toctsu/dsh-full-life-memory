@@ -111,6 +111,12 @@ const collect = (node, out = []) => {
 const text = flatten(page)
 assert.match(text, /threshold/, 'renders the threshold row')
 assert.match(text, /autoForget/, 'renders the auto-fold switch')
+assert.match(text, /checkUpdate/, 'renders the update check button')
+assert.match(text, /v0\.3\.1/, 'renders the running version')
+
+const buttons = collect(page).filter((node) => node.type === 'button')
+assert.ok(buttons.some((node) => node.children.includes('checkUpdate')), 'update check is clickable')
+assert.ok(buttons.some((node) => node.children.includes('save')), 'save button stays')
 
 const inputs = collect(page).filter((node) => node.type === 'input')
 assert.ok(inputs.length >= 3, 'renders one input per number field')
@@ -118,7 +124,26 @@ assert.equal(inputs[0].props.value, '12000', 'shows the live threshold value')
 assert.equal(inputs[1].props.value, '3', 'shows the live folded-turn count')
 assert.equal(inputs[2].props.value, '5', 'shows the live kept-turn count')
 
+// 检查更新走 registry 的 /latest；按钮回调应当请求正确地址
+let requested = ''
+globalThis.fetch = async (url) => {
+  requested = String(url)
+  return { ok: true, json: async () => ({ version: '9.9.9' }) }
+}
+const checkButton = buttons.find((node) => node.children.includes('checkUpdate'))
+await checkButton.props.onClick()
+assert.equal(requested, 'https://registry.npmjs.org/@tuhengyu%2Fdsh-full-life-memory/latest')
+
+// registry 失败不应该抛到渲染层
+globalThis.fetch = async () => ({ ok: false, status: 503 })
+await checkButton.props.onClick()
+
 const summary = bundle.component({ view: 'summary', t: (key) => key })
 assert.ok(summary && typeof summary === 'string', 'summary view renders a one-liner')
+
+// 版本必须在三处一致：package.json / client.js 常量 / 渲染出来的版本号
+const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'))
+assert.match(text, new RegExp(`v${pkg.version.replace(/\./g, '\\.')}`), 'client version matches package.json')
+assert.equal(pkg.version, '0.3.1', 'bump client constant together with package.json')
 
 console.log('client-smoke: OK')

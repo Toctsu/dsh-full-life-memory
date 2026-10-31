@@ -8,7 +8,7 @@
 像人一样遗忘，也像人一样回忆。</p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-0.3.0-6d5efc?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.3.1-6d5efc?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-1fc8b3?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/node-%E2%89%A5%2024-339933?style=flat-square&logo=node.js&logoColor=white" alt="node" />
   <img src="https://img.shields.io/badge/dependencies-0-52525b?style=flat-square" alt="zero dependencies" />
@@ -137,6 +137,22 @@ plugin_manager { action: "install_bundle", target: "<本目录的绝对路径>" 
 - **自动折叠**：总开关，关掉后只保留手动回忆
 
 下方实时算出「什么时候会触发」：例如 `至少需要 6 个已完成轮次（折叠 2 轮 + 保留 4 轮）才会动手`，改数字时同步刷新。
+
+## 🔄 检查更新 / 一键更新
+
+表单上方有一行版本信息：`v0.3.1  [检查更新]`。
+
+| 状态 | 表现 |
+|---|---|
+| 点「检查更新」 | 请求 `registry.npmjs.org/<包名>/latest`，与运行中的版本比对 |
+| 有新版本 | 显示 `→ v0.3.2` 和「立即更新」 |
+| 已是最新 | 顶部轻提示「当前已是最新版本」，2.6 秒后自动消失 |
+| 点「立即更新」 | 调用 DSH 的 `pluginManager.installBundle`，由 Host 执行 pnpm 下载并校验 |
+| 更新完成 | 弹出模态框：「更新已下载，请重启 DSH 以应用新版本」 |
+
+为什么不自己 `child_process` 跑 pnpm：`pluginManager` 已经处理了 profile 写入锁、依赖脚本审批、peer 兼容性检查、失败回滚、registry 回退和「是否需要重启」的判定。自己 spawn 会绕过这些，还可能把 profile 的 `package.json` 写坏。
+
+> 版本探测优先走浏览器直连 registry；如果部署的 CSP/CORS 拦住了跨域请求，会退回 Host 的 `pluginManager.inspect` 再查一次。
 
 这些字段标了 `.volatile()`：保存后**下一轮就生效**，不用重启 Host；已经折叠掉的历史不会被恢复。
 
