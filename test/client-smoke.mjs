@@ -10,6 +10,15 @@ import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(here, '..', 'client.js'), 'utf8')
+const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'))
+const VERSION = pkg.version
+
+// 版本号只能在 package.json 维护；client.js 由 scripts/sync-version.mjs 同步
+assert.match(
+  source,
+  new RegExp(`const CURRENT_VERSION = '${VERSION.replace(/\./g, '\\.')}'`),
+  'client.js CURRENT_VERSION must match package.json (run npm run sync-version)',
+)
 
 let captured
 globalThis.window = { __ModuleLoader__: { load: (entry) => { captured = entry } } }
@@ -112,7 +121,7 @@ const text = flatten(page)
 assert.match(text, /threshold/, 'renders the threshold row')
 assert.match(text, /autoForget/, 'renders the auto-fold switch')
 assert.match(text, /checkUpdate/, 'renders the update check button')
-assert.match(text, /v0\.3\.2/, 'renders the running version')
+assert.match(text, new RegExp(`v${VERSION.replace(/\./g, '\\.')}`), 'renders the running version')
 assert.match(text, /tabGlobal/, 'renders the global tab')
 assert.match(text, /tabScenes/, 'renders the scenes tab')
 
@@ -164,10 +173,5 @@ assert.match(scenesText, /sceneEnabled/, 'offers the per-scene enable switch')
 
 const summary = bundle.component({ view: 'summary', t: (key) => key })
 assert.ok(summary && typeof summary === 'string', 'summary view renders a one-liner')
-
-// 版本必须在三处一致：package.json / client.js 常量 / 渲染出来的版本号
-const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'))
-assert.match(text, new RegExp(`v${pkg.version.replace(/\./g, '\\.')}`), 'client version matches package.json')
-assert.equal(pkg.version, '0.3.2', 'bump client constant together with package.json')
 
 console.log('client-smoke: OK')

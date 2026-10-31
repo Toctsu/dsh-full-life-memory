@@ -216,7 +216,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 当前正在运行的版本（编译进浏览器模块；升级后需重启才会变）。 */
-    const CURRENT_VERSION = '0.3.2'
+    const CURRENT_VERSION = '0.3.4'
     const REGISTRY_URL = `https://registry.npmjs.org/${PKG.replace('/', '%2F')}/latest`
 
     function compareVersions(a, b) {

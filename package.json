@@ -1,6 +1,6 @@
 {
   "name": "@tuhengyu/dsh-full-life-memory",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "仿生终身记忆：上下文放不下时把旧轮次蒸馏成 token 线索并从历史切除，需要时用 recall_from_clues 把线索重建成回忆。",
   "keywords": [
     "dsh-plugin",
@@ -69,6 +69,11 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
+  },
+  "scripts": {
+    "version": "node scripts/sync-version.mjs",
+    "sync-version": "node scripts/sync-version.mjs",
+    "test": "node test/smoke.mjs && node test/auto-forget.mjs && node test/client-smoke.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cosmokit": "~1.8.6",
