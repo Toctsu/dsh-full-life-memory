@@ -1,6 +1,6 @@
 {
   "name": "@tuhengyu/dsh-full-life-memory",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "仿生终身记忆：上下文放不下时把旧轮次蒸馏成 token 线索并从历史切除，需要时用 recall_from_clues 把线索重建成回忆。",
   "keywords": [
     "dsh-plugin",
