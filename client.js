@@ -29,6 +29,8 @@ window.__ModuleLoader__.load({
       keepTurnsHint: '最近这么多轮永远保留，不影响你接着刚才的话题聊。',
       autoForget: '自动遗忘',
       autoForgetHint: '关闭后不再自动遗忘，但仍可手动回忆。',
+      isolateByUser: '按用户隔离记忆',
+      isolateByUserHint: '群聊里每个人只召回自己说过的话；关闭时全群共用一份记忆。',
       condition: '什么时候会触发',
       planText: '对话超过 {threshold} tokens 时，遗忘最旧的 {forget} 轮，最近 {keep} 轮始终保留。',
       conditionText: '至少要有 {n} 轮聊完的对话（遗忘 {f} 轮 + 保留 {k} 轮）才会开始；在那之前只观察，不动手。',
@@ -76,6 +78,8 @@ window.__ModuleLoader__.load({
       keepTurnsHint: 'The newest turns are never touched, so you can keep chatting where you left off.',
       autoForget: 'Forget automatically',
       autoForgetHint: 'Turn it off to stop automatic forgetting; manual recall still works.',
+      isolateByUser: 'Isolate memory per user',
+      isolateByUserHint: 'In group chats each person recalls only their own messages; off means one shared memory for the whole group.',
       condition: 'When it kicks in',
       planText: 'Past {threshold} tokens, the oldest {forget} turns are forgotten and the last {keep} stay.',
       conditionText: 'At least {n} finished turns are needed (forget {f} + keep {k}); before that it only watches.',
@@ -224,7 +228,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 当前正在运行的版本（编译进浏览器模块；升级后需重启才会变）。 */
-    const CURRENT_VERSION = '0.3.6'
+    const CURRENT_VERSION = '0.4.0'
     const REGISTRY_URL = `https://registry.npmjs.org/${PKG.replace('/', '%2F')}/latest`
 
     function compareVersions(a, b) {
@@ -305,6 +309,20 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function SwitchRow(props) {
+      return h(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 } },
+          h('span', { style: { fontSize: 13, fontWeight: 500, color: color.text } }, props.label),
+          h(Toggle, { checked: props.checked, onChange: props.onChange, disabled: props.disabled }),
+        ),
+        h('span', { style: { fontSize: 12, lineHeight: 1.5, color: color.muted } }, props.hint),
+      )
+    }
+
     function SceneCard(props) {
       const { name, scene, globals, t } = props
       const [draft, setDraft] = React.useState(null)
@@ -313,6 +331,8 @@ window.__ModuleLoader__.load({
         forgetThresholdTokens: numberOr(scene.forgetThresholdTokens, globals.forgetThresholdTokens),
         forgetTurns: numberOr(scene.forgetTurns, globals.forgetTurns),
         keepCompletedTurns: numberOr(scene.keepCompletedTurns, globals.keepCompletedTurns),
+        isolateByUser:
+          typeof scene.isolateByUser === 'boolean' ? scene.isolateByUser : globals.isolateByUser === true,
       }
       const current = draft || base
       const changed = JSON.stringify(current) !== JSON.stringify(base)
@@ -377,6 +397,12 @@ window.__ModuleLoader__.load({
           h('span', { style: { fontSize: 13 } }, t('sceneEnabled')),
           h(Toggle, { checked: current.enabled, onChange: () => setDraft({ ...current, enabled: !current.enabled }) }),
         ),
+        h(SwitchRow, {
+          label: t('isolateByUser'),
+          hint: t('isolateByUserHint'),
+          checked: current.isolateByUser,
+          onChange: () => setDraft({ ...current, isolateByUser: !current.isolateByUser }),
+        }),
         numberRow('forgetThresholdTokens', 'threshold', 500, 200000, 500),
         numberRow('forgetTurns', 'forgetTurns', 1, 10, 1),
         numberRow('keepCompletedTurns', 'keepTurns', 0, 50, 1),
@@ -466,6 +492,7 @@ window.__ModuleLoader__.load({
         forgetTurns: numberOr(value.forgetTurns, 2),
         keepCompletedTurns: numberOr(value.keepCompletedTurns, 4),
         autoForget: value.autoForget !== false,
+        isolateByUser: value.isolateByUser === true,
       }
       const current = draft || base
       const minimum = current.forgetTurns + current.keepCompletedTurns
@@ -473,7 +500,8 @@ window.__ModuleLoader__.load({
         current.forgetThresholdTokens !== base.forgetThresholdTokens ||
         current.forgetTurns !== base.forgetTurns ||
         current.keepCompletedTurns !== base.keepCompletedTurns ||
-        current.autoForget !== base.autoForget
+        current.autoForget !== base.autoForget ||
+        current.isolateByUser !== base.isolateByUser
 
       const edit = (key, next) => setDraft({ ...current, [key]: next })
 
@@ -545,6 +573,9 @@ window.__ModuleLoader__.load({
           if (current.autoForget !== base.autoForget) {
             ops.push({ op: 'set', path: ['autoForget'], value: current.autoForget })
           }
+          if (current.isolateByUser !== base.isolateByUser) {
+            ops.push({ op: 'set', path: ['isolateByUser'], value: current.isolateByUser })
+          }
           if (ops.length > 0) await controller.write(ops, revision)
           setDraft(null)
           setNote({ kind: 'ok', text: t('saved') })
@@ -578,46 +609,21 @@ window.__ModuleLoader__.load({
 
       const switchRow = h(
         'div',
-        { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
-        h(
-          'div',
-          { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 } },
-          h('span', { style: { fontSize: 13, fontWeight: 500, color: color.text } }, t('autoForget')),
-          h(
-            'button',
-            {
-              type: 'button',
-              role: 'switch',
-              'aria-checked': current.autoForget ? 'true' : 'false',
-              disabled: busy || !writable,
-              onClick: () => edit('autoForget', !current.autoForget),
-              style: {
-                width: 40,
-                height: 22,
-                borderRadius: 999,
-                border: `1px solid ${current.autoForget ? 'transparent' : color.borderStrong}`,
-                background: current.autoForget ? color.accent : 'transparent',
-                cursor: busy || !writable ? 'default' : 'pointer',
-                padding: 0,
-                position: 'relative',
-                transition: 'background .15s ease',
-              },
-            },
-            h('span', {
-              style: {
-                position: 'absolute',
-                top: 2,
-                left: current.autoForget ? 20 : 2,
-                width: 16,
-                height: 16,
-                borderRadius: '50%',
-                background: current.autoForget ? '#ffffff' : color.muted,
-                transition: 'left .15s ease',
-              },
-            }),
-          ),
-        ),
-        h('span', { style: { fontSize: 12, lineHeight: 1.5, color: color.muted } }, t('autoForgetHint')),
+        { style: { display: 'flex', flexDirection: 'column', gap: 14 } },
+        h(SwitchRow, {
+          label: t('autoForget'),
+          hint: t('autoForgetHint'),
+          checked: current.autoForget,
+          disabled: busy || !writable,
+          onChange: () => edit('autoForget', !current.autoForget),
+        }),
+        h(SwitchRow, {
+          label: t('isolateByUser'),
+          hint: t('isolateByUserHint'),
+          checked: current.isolateByUser,
+          disabled: busy || !writable,
+          onChange: () => edit('isolateByUser', !current.isolateByUser),
+        }),
       )
 
       const facts = h(

@@ -74,7 +74,8 @@ try {
   assert.ok(hit.prompt.includes('线索词：'))
   assert.ok(hit.prompt.includes('残留片段：'))
   assert.ok(!hit.prompt.includes('session_id'), 'raw columns never reach the model')
-  assert.deepEqual(Object.keys(hit).sort(), ['count', 'found', 'keyword', 'prompt'])
+  assert.deepEqual(Object.keys(hit).sort(), ['count', 'found', 'keyword', 'prompt', 'scope', 'userId'])
+  assert.equal(hit.scope, 'auto', 'default recall scope is auto')
 
   // rendered text IS the prompt (this is what the model receives)
   const rendered = tool.output.render({ keyword: 'sqlite' }, hit)

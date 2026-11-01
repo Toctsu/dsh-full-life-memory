@@ -8,7 +8,7 @@
 像人一样遗忘，也像人一样回忆。</p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-0.3.6-6d5efc?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.4.0-6d5efc?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-1fc8b3?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/node-%E2%89%A5%2024-339933?style=flat-square&logo=node.js&logoColor=white" alt="node" />
   <img src="https://img.shields.io/badge/dependencies-0-52525b?style=flat-square" alt="zero dependencies" />
@@ -149,6 +149,29 @@ sceneOverrides:
 - 场景可以反向打开全局关闭的折叠——全局 `autoForget: false` 只影响没有场景覆盖的会话
 
 设置页的「场景」标签页可以增删改这些覆盖，不用手写 YAML。
+
+## 👥 群聊记忆隔离（Phase 3）
+
+DSH 把一个 QQ 群当成**一个 Session**，默认是「全群共用一份记忆」——群友 A 说的话，B 一问就可能被召回，这就是串台。
+
+打开 `isolateByUser` 后：
+
+| 阶段 | 行为 |
+|---|---|
+| **识别** | 从最新一条用户消息的正文前缀抽发送者：`[User: 12345]`、`[用户: 12345]`、`小明(123456):`、`qq: 10001`；正则可用 `senderPatterns` 覆盖 |
+| **折叠** | 按发送者分组：自己的对话存成私有线索（`user_id = 10001`），别人的存成全群共享（`user_id IS NULL`）；`othersAsGlobal: false` 则直接丢弃别人的对话 |
+| **召回** | 默认 `scope: auto` = 自己的 + 全群共享；`scope: user` 只看自己；`scope: global` 只看共享 |
+| **降级** | 认不出发送者 → 自动回到全局模式，不报错、不丢数据 |
+
+```yaml
+isolateByUser: false        # 全局默认关
+othersAsGlobal: true        # 别人的对话进共享记忆
+sceneOverrides:
+  qqbot:
+    isolateByUser: true     # 群聊场景打开
+```
+
+旧库不用手动处理：启动时检测 `memory_clues` 缺 `user_id` 就自动 `ALTER TABLE` 补上，历史线索保留为共享记忆（`user_id` 为 `NULL`），新折叠的才按人归档。
 
 ## 🛠 设置界面
 

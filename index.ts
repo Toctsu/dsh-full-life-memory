@@ -28,6 +28,18 @@ export const name = 'full-life-memory'
 export const inject = ['tools']
 
 /**
+ * 从用户消息里猜发送者的默认正则（取第一个捕获组）。
+ * QQ / 微信桥接插件没有统一的 metadata，通常把发送者写在正文前缀里，
+ * 所以这里覆盖几种常见写法；具体部署可在 senderPatterns 里覆盖。
+ */
+const DEFAULT_SENDER_PATTERNS = [
+  '\\[(?:user|uid|qq|sender|from|用户|发送者|成员|群友)\\s*[:：=]\\s*([^\\]\\s]{1,64})\\]',
+  '^\\s*\\[(\\d{5,12})\\]',
+  '^\\s*([^\\s:：]{1,32})[（(](\\d{5,12})[)）]\\s*[:：]',
+  '^\\s*(?:qq|user|uid)\\s*[:=]\\s*(\\d{5,12})\\b',
+]
+
+/**
  * 场景覆盖：键是场景标识（会话 header.agentPreset，缺省时用 origin，最后回落到 default）。
  * 只有写出来的字段才覆盖全局值。
  */
@@ -36,6 +48,7 @@ export const SceneSchema = z.object({
   forgetThresholdTokens: z.natural().min(500).max(200000),
   forgetTurns: z.natural().min(1).max(10),
   keepCompletedTurns: z.natural().min(0).max(50),
+  isolateByUser: z.boolean(),
 })
 
 /**
@@ -50,6 +63,9 @@ export const Config = z.object({
   forgetThresholdTokens: z.natural().min(500).max(200000).default(8000).volatile(),
   forgetTurns: z.natural().min(1).max(10).default(2).volatile(),
   keepCompletedTurns: z.natural().min(0).max(50).default(4).volatile(),
+  isolateByUser: z.boolean().default(false).volatile(),
+  senderPatterns: z.array(z.string()).default([...DEFAULT_SENDER_PATTERNS]).volatile(),
+  othersAsGlobal: z.boolean().default(true).volatile(),
   sceneOverrides: z.dict(SceneSchema).default({}).volatile(),
 })
 
@@ -62,6 +78,8 @@ export interface SceneOverride {
   forgetTurns?: number
   /** 该场景保留最近几轮；缺省跟随全局 */
   keepCompletedTurns?: number
+  /** 该场景是否按发送者隔离记忆；缺省跟随全局 */
+  isolateByUser?: boolean
 }
 
 export interface Config {
@@ -79,6 +97,12 @@ export interface Config {
   forgetTurns?: number
   /** 无论多大压力都至少保留多少轮最近对话，默认 4 */
   keepCompletedTurns?: number
+  /** 群聊里按发送者隔离记忆，默认 false */
+  isolateByUser?: boolean
+  /** 从消息正文提取发送者的正则列表（取第一个捕获组），默认见 DEFAULT_SENDER_PATTERNS */
+  senderPatterns?: string[]
+  /** 折叠时把别人的对话记为全群共享记忆；false 表示直接跳过 */
+  othersAsGlobal?: boolean
   /** 按场景覆盖：键为场景标识（如 qqbot / wechat），值只写需要覆盖的字段 */
   sceneOverrides?: Record<string, SceneOverride>
 }
@@ -91,6 +115,9 @@ interface ResolvedConfig {
   forgetThresholdTokens: number
   forgetTurns: number
   keepCompletedTurns: number
+  isolateByUser: boolean
+  senderPatterns: string[]
+  othersAsGlobal: boolean
   sceneOverrides: Record<string, SceneOverride>
 }
 
@@ -102,6 +129,8 @@ export interface NewClue {
   /** 可选：一句话概括当时发生了什么 */
   summary?: string
   sessionId?: string
+  /** 归属的发送者；null 表示全群共享（Phase 2 的历史也在这里） */
+  userId?: string | null
   createdAt?: number
 }
 
@@ -111,6 +140,7 @@ interface ClueRow {
   keywords: string
   seed_tokens: string
   summary: string | null
+  user_id: string | null
 }
 
 /* -------------------------------------------------------------------------- */
@@ -157,6 +187,11 @@ export interface PluginContext {
   logger?: { info?(message: string): void; warn?(message: string): void }
 }
 
+/** 工具执行时 Cordis 传入的上下文（只有 agent.session 用得到）。 */
+interface ToolExec {
+  agent?: { session?: SessionLike }
+}
+
 export interface SelectableSpan {
   startSeq: number
   endSeq: number
@@ -174,11 +209,13 @@ const DEFAULT_KEEP_TURNS = 4
 /**
  * 线索引擎的全部持久化结构。这里刻意没有 message 正文字段：
  * 一旦存了全文，就等于又把上下文搬回来了。
+ * user_id 为空表示“全群共享记忆”（Phase 3 之前写入的历史都落在这里）。
  */
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_clues (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id  TEXT,
+  user_id     TEXT,
   created_at  INTEGER NOT NULL,
   keywords    TEXT NOT NULL,
   seed_tokens TEXT NOT NULL,
@@ -188,6 +225,18 @@ CREATE INDEX IF NOT EXISTS memory_clues_created_at ON memory_clues (created_at D
 `
 
 const LIKE_ESCAPE = "ESCAPE '\\'"
+
+/**
+ * 旧库平滑升级：0.3.x 的库没有 user_id 列。
+ * ALTER 前先查 PRAGMA，避免重复执行时报 duplicate column。
+ */
+function migrate(db: DatabaseSync): void {
+  const columns = db.prepare('PRAGMA table_info(memory_clues)').all() as unknown as { name: string }[]
+  if (!columns.some((column) => column.name === 'user_id')) {
+    db.exec('ALTER TABLE memory_clues ADD COLUMN user_id TEXT')
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS memory_clues_user ON memory_clues (user_id, created_at DESC)')
+}
 
 /** LIKE 里 % 和 _ 是通配符，用户关键词里的这两个字符必须转义。 */
 function escapeLike(value: string): string {
@@ -244,8 +293,29 @@ function resolveConfig(config: Config | undefined): ResolvedConfig {
     forgetTurns: Number.isInteger(forgetTurns) && forgetTurns >= 1 ? Math.min(forgetTurns, 10) : DEFAULT_FORGET_TURNS,
     keepCompletedTurns:
       Number.isInteger(keepTurns) && keepTurns >= 0 ? Math.min(keepTurns, 50) : DEFAULT_KEEP_TURNS,
+    isolateByUser: liveValue<boolean>(config?.isolateByUser) === true,
+    senderPatterns: normalizePatterns(liveValue(config?.senderPatterns)),
+    othersAsGlobal: liveValue<boolean>(config?.othersAsGlobal) !== false,
     sceneOverrides: normalizeScenes(liveValue(config?.sceneOverrides)),
   }
+}
+
+/** 只保留能编译的正则，避免一条写错的配置让整个插件崩溃。 */
+function normalizePatterns(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    const usable = value
+      .filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+      .filter((item) => {
+        try {
+          new RegExp(item, 'i')
+          return true
+        } catch {
+          return false
+        }
+      })
+    if (usable.length > 0) return usable
+  }
+  return [...DEFAULT_SENDER_PATTERNS]
 }
 
 /** 把配置里的场景表整理成稳定的形状：键小写、数字裁剪到合法区间、未知键丢弃。 */
@@ -258,6 +328,7 @@ function normalizeScenes(value: unknown): Record<string, SceneOverride> {
     const scene = rawScene as Record<string, unknown>
     const entry: SceneOverride = {}
     if (typeof scene.enabled === 'boolean') entry.enabled = scene.enabled
+    if (typeof scene.isolateByUser === 'boolean') entry.isolateByUser = scene.isolateByUser
     const threshold = Number(liveValue(scene.forgetThresholdTokens))
     if (Number.isFinite(threshold) && threshold >= 500) entry.forgetThresholdTokens = Math.floor(Math.min(threshold, 200000))
     const turns = Number(liveValue(scene.forgetTurns))
@@ -292,6 +363,7 @@ export function resolveScene(settings: ResolvedConfig, scene: string): ResolvedC
     forgetThresholdTokens: override.forgetThresholdTokens ?? settings.forgetThresholdTokens,
     forgetTurns: override.forgetTurns ?? settings.forgetTurns,
     keepCompletedTurns: override.keepCompletedTurns ?? settings.keepCompletedTurns,
+    isolateByUser: override.isolateByUser ?? settings.isolateByUser,
   }
 }
 
@@ -302,6 +374,7 @@ function openDb(dbPath: string): DatabaseSync {
   db.exec('PRAGMA journal_mode = WAL')
   db.exec('PRAGMA busy_timeout = 3000')
   db.exec(SCHEMA)
+  migrate(db)
   return db
 }
 
@@ -321,10 +394,17 @@ export function storeClue(db: DatabaseSync, clue: NewClue): number {
   }
   const result = db
     .prepare(
-      `INSERT INTO memory_clues (session_id, created_at, keywords, seed_tokens, summary)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO memory_clues (session_id, user_id, created_at, keywords, seed_tokens, summary)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(clue.sessionId ?? null, clue.createdAt ?? Date.now(), keywords, seedTokens, clue.summary ?? null)
+    .run(
+      clue.sessionId ?? null,
+      clue.userId ?? null,
+      clue.createdAt ?? Date.now(),
+      keywords,
+      seedTokens,
+      clue.summary ?? null,
+    )
   return Number(result.lastInsertRowid)
 }
 
@@ -341,22 +421,45 @@ export function rememberClue(dbPath: string, clue: NewClue): number {
 /**
  * 按关键词模糊匹配线索，命中的“线索词”权重 2、“残留片段”权重 1，
  * 同分按时间倒序。用 LIKE 而不是 FTS5：中文不分词，线索本来就短。
+ *
+ * userId 为空表示没法识别发送者（退化为全局模式）；scope 控制可见范围：
+ * - auto：自己的 + 全群共享的
+ * - user：只看自己的（识别不到发送者时退化为 auto）
+ * - global：只看全群共享的
  */
-function searchClues(db: DatabaseSync, keyword: string, limit: number): ClueRow[] {
+export function searchClues(
+  db: DatabaseSync,
+  keyword: string,
+  limit: number,
+  userId?: string | null,
+  scope: 'auto' | 'user' | 'global' = 'auto',
+): ClueRow[] {
   const pattern = `%${escapeLike(keyword)}%`
+  const filterParts: string[] = []
+  const filterValues: string[] = []
+  if (scope === 'global') {
+    filterParts.push('user_id IS NULL')
+  } else if (scope === 'user' && typeof userId === 'string' && userId !== '') {
+    filterParts.push('user_id = ?')
+    filterValues.push(userId)
+  } else if (typeof userId === 'string' && userId !== '') {
+    filterParts.push('(user_id = ? OR user_id IS NULL)')
+    filterValues.push(userId)
+  }
+  const filter = filterParts.length > 0 ? ` AND (${filterParts.join(' OR ')})` : ''
   const rows = db
     .prepare(
-      `SELECT id, created_at, keywords, seed_tokens, summary,
+      `SELECT id, created_at, keywords, seed_tokens, summary, user_id,
               (CASE WHEN keywords    LIKE ? ${LIKE_ESCAPE} THEN 2 ELSE 0 END
              + CASE WHEN seed_tokens LIKE ? ${LIKE_ESCAPE} THEN 1 ELSE 0 END) AS score
          FROM memory_clues
-        WHERE keywords    LIKE ? ${LIKE_ESCAPE}
-           OR seed_tokens LIKE ? ${LIKE_ESCAPE}
-           OR summary     LIKE ? ${LIKE_ESCAPE}
+        WHERE (keywords    LIKE ? ${LIKE_ESCAPE}
+            OR seed_tokens LIKE ? ${LIKE_ESCAPE}
+            OR summary     LIKE ? ${LIKE_ESCAPE})${filter}
         ORDER BY score DESC, created_at DESC
         LIMIT ?`,
     )
-    .all(pattern, pattern, pattern, pattern, pattern, limit)
+    .all(pattern, pattern, pattern, pattern, pattern, ...filterValues, limit)
   return rows as unknown as ClueRow[]
 }
 
@@ -480,6 +583,111 @@ function messageText(message: MessageLike | null | undefined): string {
     .filter((block) => block.type === 'text' && typeof block.text === 'string')
     .map((block) => block.text as string)
     .join('\n')
+}
+
+/**
+ * 从消息正文里猜发送者。
+ * DSH 的 UserMessage 没有发送者元数据，QQ/微信桥接一般把 `[User: 12345]` 这类前缀写进正文，
+ * 所以这里按配置的正则列表逐个匹配，取第一个捕获组；都匹配不上就返回 undefined。
+ */
+export function extractSenderId(text: string, patterns: string[] = DEFAULT_SENDER_PATTERNS): string | undefined {
+  if (typeof text !== 'string' || text.trim() === '') return undefined
+  // 只看开头一段：前缀一定在正文最前面，避免正文里偶然出现的方括号被误判
+  const head = text.slice(0, 200)
+  for (const source of patterns) {
+    let regex: RegExp
+    try {
+      regex = new RegExp(source, 'i')
+    } catch {
+      continue
+    }
+    const match = regex.exec(head)
+    if (match === null) continue
+    // 取最后一个非空捕获组：像「小明(123456):」这种模式，名字在第一组、ID 在第二组
+    const groups = match.slice(1).filter((part): part is string => typeof part === 'string' && part.trim() !== '')
+    const value = groups[groups.length - 1]
+    if (typeof value === 'string') return value.trim()
+  }
+  return undefined
+}
+
+/** 当前会话“最近一条用户消息”的发送者；取不到就是 undefined（走全局模式）。 */
+export function senderOfSession(session: SessionLike, patterns: string[]): string | undefined {
+  const nodes = session.surface.nodes
+  for (let index = nodes.length - 1; index >= 0; index -= 1) {
+    const event = session.eventAt(nodes[index] as number)
+    if (event?.type !== 'user/message') continue
+    const message = session.deriveEventMessage?.(event) ?? (event.data as MessageLike)
+    return extractSenderId(messageText(message), patterns)
+  }
+  return undefined
+}
+
+/** pre-step 的 payload.messages 是本步收件箱，优先用它判断“谁在说话”。 */
+function senderFromPayload(payload: any, patterns: string[]): string | undefined {
+  const messages = payload?.messages
+  if (!Array.isArray(messages)) return undefined
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const sender = extractSenderId(messageText(messages[index] as MessageLike), patterns)
+    if (sender !== undefined) return sender
+  }
+  return undefined
+}
+
+export interface FoldGroup {
+  userId: string | null
+  texts: string[]
+}
+
+/**
+ * 把要折叠的消息按发送者分组。
+ *
+ * 发送者只能从用户消息的正文前缀里认；assistant / tool 消息归属于它们前面的那位发言者。
+ * 没开隔离、或者认不出当前发言者时，全部落进 global 一组——也就是退化回原来的行为。
+ */
+export function groupTextsBySender(
+  session: SessionLike,
+  seqs: readonly number[],
+  options: { isolateByUser: boolean; othersAsGlobal: boolean; senderPatterns: string[] },
+  currentSender?: string,
+): FoldGroup[] {
+  const groups = new Map<string, FoldGroup>()
+  const push = (userId: string | null, text: string): void => {
+    if (text.trim() === '') return
+    const key = userId ?? ''
+    let group = groups.get(key)
+    if (group === undefined) {
+      group = { userId, texts: [] }
+      groups.set(key, group)
+    }
+    group.texts.push(text)
+  }
+
+  const isolate = options.isolateByUser && typeof currentSender === 'string' && currentSender !== ''
+  let speaker: string | null = null
+
+  for (const seq of seqs) {
+    const event = session.eventAt(seq)
+    if (event === undefined) continue
+    const message = session.deriveEventMessage?.(event) ?? (event.data as MessageLike)
+    const text = messageText(message)
+    if (event.type === 'user/message') {
+      speaker = extractSenderId(text, options.senderPatterns) ?? null
+    }
+
+    if (!isolate) {
+      push(null, text)
+      continue
+    }
+    if (speaker !== null && speaker === currentSender) {
+      push(speaker, text)
+    } else if (options.othersAsGlobal) {
+      push(null, text)
+    }
+    // othersAsGlobal=false：别人的对话直接跳过，不留任何痕迹
+  }
+
+  return [...groups.values()]
 }
 
 /** seq → 轮次号。只记录 turn/start 到 turn/end 之间的事件。 */
@@ -686,25 +894,33 @@ export function installForgettingHook(
       const span = selectForgettableSpan(session, effective, events)
       if (span === null) return await next()
 
-      const texts: string[] = []
-      for (const seq of span.shadowedSeqs) {
-        texts.push(messageText(session.deriveEventMessage?.(session.eventAt(seq))))
-      }
-      const clue = extractClue(texts.filter((text) => text.trim() !== ''))
-      if (clue.seedTokens.length === 0) return await next()
+      // 群聊隔离：识别当前发言者，再把要折叠的消息按发送者分组
+      const currentSender = effective.isolateByUser
+        ? senderFromPayload(payload, effective.senderPatterns) ?? senderOfSession(session, effective.senderPatterns)
+        : undefined
+      const groups = groupTextsBySender(session, span.shadowedSeqs, effective, currentSender)
+      const clues = groups
+        .map((group) => ({ userId: group.userId, clue: extractClue(group.texts) }))
+        .filter((entry) => entry.clue.seedTokens.length > 0)
+      if (clues.length === 0) return await next()
 
       // 先落库：这一步失败就不开 compaction 事务，surface 保持原样。
-      storeClue(connection(settings.dbPath), {
-        sessionId: String((payload.agent as { id?: string } | undefined)?.id ?? session.id ?? ''),
-        keywords: clue.keywords,
-        seedTokens: clue.seedTokens,
-        summary: clue.summary,
-      })
+      const db = connection(settings.dbPath)
+      const sessionId = String((payload.agent as { id?: string } | undefined)?.id ?? session.id ?? '')
+      for (const entry of clues) {
+        storeClue(db, {
+          sessionId,
+          userId: entry.userId,
+          keywords: entry.clue.keywords,
+          seedTokens: entry.clue.seedTokens,
+          summary: entry.clue.summary,
+        })
+      }
 
       // 走 DSH 自己的 compaction 词汇：Chat 会把这一段渲染成一行“记忆已折叠”，
       // 模型则只看到被替换进去的那条 checkpoint 消息。
       const compactionId = randomUUID()
-      const notice = buildForgetNotice(clue, span.turns.length)
+      const notice = buildForgetNotice(clues[0]?.clue ?? extractClue([]), span.turns.length)
       session.append('compaction/start', { compactionId, turn: payload.turn })
       try {
         session.append('compaction/summary', {
@@ -726,9 +942,11 @@ export function installForgettingHook(
       }
 
       lastCutTurn = payload.turn
+      const owners = clues.map((entry) => entry.userId ?? 'global').join(', ')
       ctx.logger?.info?.(
         `full-life-memory: folded ${span.turns.length} turn(s) (~${tokens} tokens) in scene "${scene}" ` +
-        `from surface seq ${span.startSeq}..${span.endSeq} as compaction ${compactionId}; clues: ${clue.keywords.join(', ')}`,
+        `from surface seq ${span.startSeq}..${span.endSeq} as compaction ${compactionId}; ` +
+        `clues: ${clues.map((entry) => entry.clue.keywords.join('/')).join(' | ')}; owners: ${owners}`,
       )
     } catch (error) {
       ctx.logger?.warn?.(`full-life-memory: forget skipped: ${error instanceof Error ? error.message : String(error)}`)
@@ -791,7 +1009,8 @@ export function apply(ctx: PluginContext, config?: Config): void {
       'Use it when the user refers to something you have no context for ("as we discussed", "that project from last week", a name you do not recognize), ' +
       'or when a topic feels familiar but the specifics are gone. ' +
       'Returns a memory prompt assembled from clue words and leftover fragments: read it as your own recollection and reconstruct what was going on, ' +
-      'rather than quoting it as a record. Call once per clue, starting with the most distinctive word the user just used.',
+      'rather than quoting it as a record. Call once per clue, starting with the most distinctive word the user just used. ' +
+      'In a group chat, results are scoped to the current speaker by default; pass scope "global" to search memories shared by the whole group.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -803,18 +1022,27 @@ export function apply(ctx: PluginContext, config?: Config): void {
             'The clue to recall by: a distinctive name, project, file, term, or short phrase from the conversation. ' +
             'One concrete word works better than a whole sentence.',
         },
+        scope: {
+          type: 'string',
+          enum: ['auto', 'user', 'global'],
+          description:
+            'Whose memory to search. "auto" (default) reads the current speaker plus group-shared clues; ' +
+            '"user" limits to the current speaker; "global" searches only group-shared memories.',
+        },
       },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        required: ['found', 'keyword', 'count', 'prompt'],
+        required: ['found', 'keyword', 'count', 'prompt', 'scope'],
         properties: {
           found: { type: 'boolean' },
           keyword: { type: 'string' },
           count: { type: 'integer' },
           prompt: { type: 'string' },
+          scope: { type: 'string' },
+          userId: { type: 'string' },
         },
       },
       // 模型看到的只有这段 prompt —— 线索本身不外泄，逼它自己做重建。
@@ -822,20 +1050,31 @@ export function apply(ctx: PluginContext, config?: Config): void {
         return [{ type: 'text', text: value.prompt }]
       },
     },
-    async execute(args: unknown) {
-      const raw = (args as { keyword?: unknown } | undefined)?.keyword
+    async execute(args: unknown, exec?: ToolExec) {
+      const raw = (args as { keyword?: unknown; scope?: unknown } | undefined)?.keyword
       const keyword = typeof raw === 'string' ? raw.trim() : ''
       if (keyword === '') throw new Error('recall_from_clues requires a non-empty keyword')
+      const rawScope = (args as { scope?: unknown } | undefined)?.scope
+      const scope: 'auto' | 'user' | 'global' =
+        rawScope === 'user' || rawScope === 'global' ? rawScope : 'auto'
 
       const settings = readSettings()
-      const clues = searchClues(connection(settings.dbPath), keyword, settings.limit)
+      const session = exec?.agent?.session
+      // 找不到会话或识别不出发送者时，userId 为空 → 查询退化为全局（不报错）
+      const userId = settings.isolateByUser && session !== undefined
+        ? senderOfSession(session, settings.senderPatterns)
+        : undefined
+
+      const clues = searchClues(connection(settings.dbPath), keyword, settings.limit, userId, scope)
       if (clues.length === 0) {
-        return { found: false, keyword, count: 0, prompt: buildEmptyPrompt(keyword) }
+        return { found: false, keyword, count: 0, scope, userId: userId ?? '', prompt: buildEmptyPrompt(keyword) }
       }
       return {
         found: true,
         keyword,
         count: clues.length,
+        scope,
+        userId: userId ?? '',
         prompt: buildRecallPrompt(keyword, clues, settings.maxPromptChars),
       }
     },
