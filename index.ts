@@ -74,6 +74,8 @@ export const Config = z.object({
   senderPatterns: z.array(z.string()).default([...DEFAULT_SENDER_PATTERNS]).volatile(),
   othersAsGlobal: z.boolean().default(true).volatile(),
   debugSender: z.boolean().default(false).volatile(),
+  isolationScope: z.string().default('user').volatile(),
+  sceneMap: z.dict(z.string()).default({}).volatile(),
   sceneOverrides: z.dict(SceneSchema).default({}).volatile(),
 })
 
@@ -113,6 +115,10 @@ export interface Config {
   othersAsGlobal?: boolean
   /** 诊断开关：在日志里打印发送者识别结果，用来排查桥接的前缀格式 */
   debugSender?: boolean
+  /** 隔离粒度：'user'（同一个人跨群共享）或 'user+scene'（同一个群才共享） */
+  isolationScope?: 'user' | 'user+scene'
+  /** 场景兜底：正则 → 场景名，匹配会话的 preset / origin / id / cwd */
+  sceneMap?: Record<string, string>
   /** 按场景覆盖：键为场景标识（如 qqbot / wechat），值只写需要覆盖的字段 */
   sceneOverrides?: Record<string, SceneOverride>
 }
@@ -129,6 +135,8 @@ interface ResolvedConfig {
   senderPatterns: string[]
   othersAsGlobal: boolean
   debugSender: boolean
+  isolationScope: 'user' | 'user+scene'
+  sceneMap: Record<string, string>
   sceneOverrides: Record<string, SceneOverride>
 }
 
@@ -142,6 +150,8 @@ export interface NewClue {
   sessionId?: string
   /** 归属的发送者；null 表示全群共享（Phase 2 的历史也在这里） */
   userId?: string | null
+  /** 产生这条线索的场景（agentPreset 或 sceneMap 的结果） */
+  scene?: string | null
   createdAt?: number
 }
 
@@ -152,6 +162,7 @@ interface ClueRow {
   seed_tokens: string
   summary: string | null
   user_id: string | null
+  scene: string | null
 }
 
 /* -------------------------------------------------------------------------- */
@@ -182,7 +193,7 @@ interface SurfaceIntentLike {
 
 interface SessionLike {
   id?: string
-  header?: { agentPreset?: string; origin?: string }
+  header?: { agentPreset?: string; origin?: string; cwd?: string }
   surface: { nodes: readonly number[] }
   snapshotEvents(): readonly SessionEventLike[]
   eventAt(seq: number): SessionEventLike | undefined
@@ -227,6 +238,7 @@ CREATE TABLE IF NOT EXISTS memory_clues (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id  TEXT,
   user_id     TEXT,
+  scene       TEXT,
   created_at  INTEGER NOT NULL,
   keywords    TEXT NOT NULL,
   seed_tokens TEXT NOT NULL,
@@ -238,15 +250,16 @@ CREATE INDEX IF NOT EXISTS memory_clues_created_at ON memory_clues (created_at D
 const LIKE_ESCAPE = "ESCAPE '\\'"
 
 /**
- * 旧库平滑升级：0.3.x 的库没有 user_id 列。
+ * 旧库平滑升级：0.3.x 的库没有 user_id，0.4.x 的库没有 scene。
  * ALTER 前先查 PRAGMA，避免重复执行时报 duplicate column。
  */
 function migrate(db: DatabaseSync): void {
   const columns = db.prepare('PRAGMA table_info(memory_clues)').all() as unknown as { name: string }[]
-  if (!columns.some((column) => column.name === 'user_id')) {
-    db.exec('ALTER TABLE memory_clues ADD COLUMN user_id TEXT')
-  }
+  const has = (name: string): boolean => columns.some((column) => column.name === name)
+  if (!has('user_id')) db.exec('ALTER TABLE memory_clues ADD COLUMN user_id TEXT')
+  if (!has('scene')) db.exec('ALTER TABLE memory_clues ADD COLUMN scene TEXT')
   db.exec('CREATE INDEX IF NOT EXISTS memory_clues_user ON memory_clues (user_id, created_at DESC)')
+  db.exec('CREATE INDEX IF NOT EXISTS memory_clues_scene ON memory_clues (scene, user_id, created_at DESC)')
 }
 
 /** LIKE 里 % 和 _ 是通配符，用户关键词里的这两个字符必须转义。 */
@@ -282,6 +295,8 @@ function currentConfig(ctx: PluginContext, fallback: Config | undefined): Config
     isolateByUser: liveValue<boolean>(raw.isolateByUser),
     othersAsGlobal: liveValue<boolean>(raw.othersAsGlobal),
     debugSender: liveValue<boolean>(raw.debugSender),
+    isolationScope: liveValue<string>(raw.isolationScope) === 'user+scene' ? 'user+scene' : 'user',
+    sceneMap: liveValue<Record<string, string>>(raw.sceneMap),
     senderPatterns: liveValue<string[]>(raw.senderPatterns),
     sceneOverrides: liveValue<Record<string, SceneOverride>>(raw.sceneOverrides),
   }
@@ -312,6 +327,8 @@ function resolveConfig(config: Config | undefined): ResolvedConfig {
     senderPatterns: normalizePatterns(liveValue(config?.senderPatterns)),
     othersAsGlobal: liveValue<boolean>(config?.othersAsGlobal) !== false,
     debugSender: liveValue<boolean>(config?.debugSender) === true,
+    isolationScope: liveValue<string>(config?.isolationScope) === 'user+scene' ? 'user+scene' : 'user',
+    sceneMap: normalizeSceneMap(liveValue(config?.sceneMap)),
     sceneOverrides: normalizeScenes(liveValue(config?.sceneOverrides)),
   }
 }
@@ -356,13 +373,41 @@ function normalizeScenes(value: unknown): Record<string, SceneOverride> {
   return result
 }
 
+/** 场景映射表：键是正则，值是场景名；写坏的正则直接丢弃。 */
+function normalizeSceneMap(value: unknown): Record<string, string> {
+  if (value === null || typeof value !== 'object') return {}
+  const result: Record<string, string> = {}
+  for (const [pattern, scene] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof scene !== 'string' || scene.trim() === '') continue
+    try {
+      new RegExp(pattern, 'i')
+    } catch {
+      continue
+    }
+    result[pattern] = scene.trim().toLowerCase()
+  }
+  return result
+}
+
 /**
  * 当前会话属于哪个场景。
- * DSH 的 SessionHeader 没有独立的渠道字段：外部接入（QQ/微信）通常以自己的 agent 预设建会话，
- * 所以优先 agentPreset，其次 origin，最后 default。
+ * DSH 的 SessionHeader 没有独立的渠道字段：外部接入（QQ/微信）通常以自己的 agent 预设建会话。
+ * 先看 sceneMap（可匹配 preset / origin / 会话 id / cwd），再退回 agentPreset → origin → default。
  */
-export function sceneOf(session: SessionLike): string {
-  const header = (session as { header?: { agentPreset?: unknown; origin?: unknown } }).header ?? {}
+export function sceneOf(session: SessionLike, sceneMap: Record<string, string> = {}): string {
+  const header = session.header ?? {}
+  const candidates = [header.agentPreset, header.origin, session.id, header.cwd].filter(
+    (value): value is string => typeof value === 'string' && value.trim() !== '',
+  )
+  for (const [pattern, scene] of Object.entries(sceneMap)) {
+    let regex: RegExp
+    try {
+      regex = new RegExp(pattern, 'i')
+    } catch {
+      continue
+    }
+    if (candidates.some((value) => regex.test(value))) return scene
+  }
   const preset = typeof header.agentPreset === 'string' ? header.agentPreset.trim().toLowerCase() : ''
   if (preset !== '') return preset
   const origin = typeof header.origin === 'string' ? header.origin.trim().toLowerCase() : ''
@@ -410,12 +455,13 @@ export function storeClue(db: DatabaseSync, clue: NewClue): number {
   }
   const result = db
     .prepare(
-      `INSERT INTO memory_clues (session_id, user_id, created_at, keywords, seed_tokens, summary)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO memory_clues (session_id, user_id, scene, created_at, keywords, seed_tokens, summary)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       clue.sessionId ?? null,
       clue.userId ?? null,
+      clue.scene ?? null,
       clue.createdAt ?? Date.now(),
       keywords,
       seedTokens,
@@ -443,29 +489,39 @@ export function rememberClue(dbPath: string, clue: NewClue): number {
  * - user：只看自己的（识别不到发送者时退化为 auto）
  * - global：只看全群共享的
  */
-export function searchClues(
-  db: DatabaseSync,
-  keyword: string,
-  limit: number,
-  userId?: string | null,
-  scope: 'auto' | 'user' | 'global' = 'auto',
-): ClueRow[] {
+export interface RecallFilter {
+  userId?: string | null
+  scope?: 'auto' | 'user' | 'global'
+  scene?: string | null
+  isolationScope?: 'user' | 'user+scene'
+}
+
+export function searchClues(db: DatabaseSync, keyword: string, limit: number, options: RecallFilter = {}): ClueRow[] {
   const pattern = `%${escapeLike(keyword)}%`
+  const scope = options.scope ?? 'auto'
+  const userId = options.userId
+  const scene = options.scene
+  const hasUser = typeof userId === 'string' && userId !== ''
+  const perScene =
+    options.isolationScope === 'user+scene' && hasUser && typeof scene === 'string' && scene !== ''
+
   const filterParts: string[] = []
   const filterValues: string[] = []
   if (scope === 'global') {
     filterParts.push('user_id IS NULL')
-  } else if (scope === 'user' && typeof userId === 'string' && userId !== '') {
-    filterParts.push('user_id = ?')
-    filterValues.push(userId)
-  } else if (typeof userId === 'string' && userId !== '') {
-    filterParts.push('(user_id = ? OR user_id IS NULL)')
-    filterValues.push(userId)
+  } else if (scope === 'user' && hasUser) {
+    filterParts.push(perScene ? '(user_id = ? AND scene = ?)' : 'user_id = ?')
+    filterValues.push(userId as string)
+    if (perScene) filterValues.push(scene as string)
+  } else if (hasUser) {
+    filterParts.push(perScene ? '((user_id = ? AND scene = ?) OR user_id IS NULL)' : '(user_id = ? OR user_id IS NULL)')
+    filterValues.push(userId as string)
+    if (perScene) filterValues.push(scene as string)
   }
   const filter = filterParts.length > 0 ? ` AND (${filterParts.join(' OR ')})` : ''
   const rows = db
     .prepare(
-      `SELECT id, created_at, keywords, seed_tokens, summary, user_id,
+      `SELECT id, created_at, keywords, seed_tokens, summary, user_id, scene,
               (CASE WHEN keywords    LIKE ? ${LIKE_ESCAPE} THEN 2 ELSE 0 END
              + CASE WHEN seed_tokens LIKE ? ${LIKE_ESCAPE} THEN 1 ELSE 0 END) AS score
          FROM memory_clues
@@ -963,7 +1019,7 @@ export function installForgettingHook(
       const session = payload?.agent?.session as SessionLike | undefined
       if (session === undefined) return await next()
       // 先认场景，再用「全局默认 + 场景覆盖」算出生效值
-      const scene = sceneOf(session)
+      const scene = sceneOf(session, settings.sceneMap)
       const effective = resolveScene(settings, scene)
       if (!effective.autoForget) return await next()
       if (payload.signal?.aborted === true) return await next()
@@ -996,6 +1052,7 @@ export function installForgettingHook(
         storeClue(db, {
           sessionId,
           userId: entry.userId,
+          scene,
           keywords: entry.clue.keywords,
           seedTokens: entry.clue.seedTokens,
           summary: entry.clue.summary,
@@ -1038,8 +1095,9 @@ export function installForgettingHook(
       if (effective.debugSender) {
         const probe = senderFromPayload(payload, effective.senderPatterns) ?? senderOfSession(session, effective.senderPatterns)
         ctx.logger?.info?.(
-          `full-life-memory: sender probe preset=${JSON.stringify(session.header?.agentPreset ?? null)} ` +
-          `sender=${JSON.stringify(probe ?? null)} groups=${groups.length} ` +
+          `full-life-memory: sender probe scene=${JSON.stringify(scene)} ` +
+          `preset=${JSON.stringify(session.header?.agentPreset ?? null)} ` +
+          `sender=${JSON.stringify(probe ?? null)} scope=${effective.isolationScope} groups=${groups.length} ` +
           `sample=${JSON.stringify((groups[0]?.texts[0] ?? '').slice(0, 120))}`,
         )
       }
@@ -1155,12 +1213,18 @@ export function apply(ctx: PluginContext, config?: Config): void {
 
       const settings = readSettings()
       const session = exec?.agent?.session
+      const scene = session !== undefined ? sceneOf(session, settings.sceneMap) : undefined
       // 找不到会话或识别不出发送者时，userId 为空 → 查询退化为全局（不报错）
       const userId = settings.isolateByUser && session !== undefined
         ? senderOfSession(session, settings.senderPatterns)
         : undefined
 
-      const clues = searchClues(connection(settings.dbPath), keyword, settings.limit, userId, scope)
+      const clues = searchClues(connection(settings.dbPath), keyword, settings.limit, {
+        userId,
+        scope,
+        scene,
+        isolationScope: settings.isolationScope,
+      })
       if (clues.length === 0) {
         return { found: false, keyword, count: 0, scope, userId: userId ?? '', prompt: buildEmptyPrompt(keyword) }
       }

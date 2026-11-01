@@ -75,7 +75,7 @@ function buildSession({ turns, header = { agentPreset: 'qqbot' }, textFor = (tur
   }
 
   return {
-    id: 'sess-1',
+    id: header?.id ?? 'sess-1',
     header,
     get surface() { return { nodes: [...nodes] } },
     snapshotEvents() { return log },
@@ -129,7 +129,7 @@ function rows(database) {
   if (!existsSync(database)) return []
   const db = new DatabaseSync(database)
   try {
-    return db.prepare('select id, session_id, user_id, keywords, seed_tokens from memory_clues order by id').all()
+    return db.prepare('select id, session_id, user_id, scene, keywords, seed_tokens from memory_clues order by id').all()
   } finally {
     db.close()
   }
@@ -282,6 +282,72 @@ try {
     const anonymous = buildSession({ turns: 1, textFor: () => '没有前缀' })
     const fallback = await recall.execute({ keyword: '豆豆' }, { agent: { session: anonymous } })
     assert.equal(fallback.found, true, 'unknown sender falls back to global search')
+  }
+
+  // ------------------------------------------------------ 场景映射兜底
+  {
+    const session = buildSession({ turns: 7, header: { id: 'qq-7788' } })
+    // 没有 agentPreset，但会话 id 带了平台前缀
+    assert.equal(mod.sceneOf(session, {}), 'default')
+    assert.equal(mod.sceneOf(session, { '^qq-': 'qqbot' }), 'qqbot')
+
+    const { ctx, handlers } = fakeCtx(9000)
+    mod.apply(ctx, {
+      dbPath: dbPath + '.map',
+      autoForget: true,
+      forgetThresholdTokens: 8000,
+      sceneMap: { '^qq-': 'qqbot' },
+      sceneOverrides: { qqbot: { forgetThresholdTokens: 5000 } },
+    })
+    await run(handlers, { agent: { id: 'sess-1', session }, turn: 7, step: 1, signal: { aborted: false } })
+    assert.ok(rows(dbPath + '.map').length > 0, 'sceneMap maps the session and the override applies')
+    assert.equal(rows(dbPath + '.map')[0].scene, 'qqbot', 'rows carry the resolved scene')
+  }
+
+  // ------------------------------------------- isolationScope: user+scene
+  {
+    const qq = buildSession({ turns: 7, header: { agentPreset: 'qqbot' }, textFor: () => `${A} 我的猫叫豆豆` })
+    const applyCtx = fakeCtx(9000)
+    mod.apply(applyCtx.ctx, {
+      dbPath: dbPath + '.scope',
+      autoForget: true,
+      forgetThresholdTokens: 8000,
+      isolateByUser: true,
+      isolationScope: 'user+scene',
+    })
+    await run(applyCtx.handlers, { agent: { id: 's1', session: qq }, turn: 7, step: 1, signal: { aborted: false } })
+
+    const recallCtx = fakeCtx(0)
+    mod.apply(recallCtx.ctx, {
+      dbPath: dbPath + '.scope',
+      autoForget: true,
+      isolateByUser: true,
+      isolationScope: 'user+scene',
+    })
+    const recall = recallCtx.tools[0]
+
+    const sameScene = buildSession({ turns: 1, header: { agentPreset: 'qqbot' }, textFor: () => `${A} 我是谁` })
+    const otherScene = buildSession({ turns: 1, header: { agentPreset: 'wechat' }, textFor: () => `${A} 我是谁` })
+    assert.equal((await recall.execute({ keyword: '豆豆' }, { agent: { session: sameScene } })).found, true)
+    assert.equal(
+      (await recall.execute({ keyword: '豆豆' }, { agent: { session: otherScene } })).found,
+      false,
+      'user+scene keeps scenes apart',
+    )
+
+    // 默认的 user 粒度则跨场景可见
+    const looseCtx = fakeCtx(0)
+    mod.apply(looseCtx.ctx, {
+      dbPath: dbPath + '.scope',
+      autoForget: true,
+      isolateByUser: true,
+    })
+    const loose = looseCtx.tools[0]
+    assert.equal(
+      (await loose.execute({ keyword: '豆豆' }, { agent: { session: otherScene } })).found,
+      true,
+      'default user scope shares across scenes',
+    )
   }
 
   // ---------------------------------------------------------- 旧库迁移

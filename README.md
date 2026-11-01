@@ -8,7 +8,7 @@
 像人一样遗忘，也像人一样回忆。</p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-0.4.1-6d5efc?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.5.0-6d5efc?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-1fc8b3?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/node-%E2%89%A5%2024-339933?style=flat-square&logo=node.js&logoColor=white" alt="node" />
   <img src="https://img.shields.io/badge/dependencies-0-52525b?style=flat-square" alt="zero dependencies" />
@@ -194,6 +194,32 @@ full-life-memory: sender probe preset="qqbot" sender="小明" groups=2 sample="�
 
 - **纯昵称做键不稳定**（改名、同名）；能让桥接带上 QQ 号就带 `[User: 12345]`，比昵称可靠。
 - **桥接必须按群复用 DSH Session**；如果每次请求都新建会话，永远凑不出「已完成轮次」，折叠不会触发。
+
+### 🎯 场景兜底：桥接不设 agentPreset 怎么办
+
+场景原本只认 `header.agentPreset`。如果桥接不设预设，用 `sceneMap` 按正则匹配会话的 preset / origin / 会话 id / cwd：
+
+```yaml
+sceneMap:
+  '^qq-': qqbot          # 会话 id 前缀
+  'napcat|astrbot': qqbot
+sceneOverrides:
+  qqbot:
+    isolateByUser: true
+```
+
+匹配到场景后，线索会带上 `scene` 字段，排错时能直接看出这条记忆来自哪个场景。
+
+### 🚧 隔离粒度：跨群还是按群
+
+`isolationScope` 决定同一个人的记忆能不能跨群看到：
+
+```yaml
+isolationScope: user        # 默认：同一个人跨群共享（人设一致）
+# isolationScope: user+scene  # 更严格：同一个群才共享（避免 A 群的事在 B 群被抖出来）
+```
+
+`user+scene` 下查询会额外带上 `scene = 当前场景` 的条件；全群共享记忆（`user_id IS NULL`）两种粒度都可见。
 
 ## 🛠 设置界面
 

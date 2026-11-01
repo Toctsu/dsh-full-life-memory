@@ -67,6 +67,8 @@ export const Config = z.object({
     senderPatterns: z.array(z.string()).default([...DEFAULT_SENDER_PATTERNS]).volatile(),
     othersAsGlobal: z.boolean().default(true).volatile(),
     debugSender: z.boolean().default(false).volatile(),
+    isolationScope: z.string().default('user').volatile(),
+    sceneMap: z.dict(z.string()).default({}).volatile(),
     sceneOverrides: z.dict(SceneSchema).default({}).volatile(),
 });
 const DEFAULT_DB_PATH = join(homedir(), '.dsh', 'full-life-memory', 'memory.db');
@@ -85,6 +87,7 @@ CREATE TABLE IF NOT EXISTS memory_clues (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id  TEXT,
   user_id     TEXT,
+  scene       TEXT,
   created_at  INTEGER NOT NULL,
   keywords    TEXT NOT NULL,
   seed_tokens TEXT NOT NULL,
@@ -94,15 +97,18 @@ CREATE INDEX IF NOT EXISTS memory_clues_created_at ON memory_clues (created_at D
 `;
 const LIKE_ESCAPE = "ESCAPE '\\'";
 /**
- * 旧库平滑升级：0.3.x 的库没有 user_id 列。
+ * 旧库平滑升级：0.3.x 的库没有 user_id，0.4.x 的库没有 scene。
  * ALTER 前先查 PRAGMA，避免重复执行时报 duplicate column。
  */
 function migrate(db) {
     const columns = db.prepare('PRAGMA table_info(memory_clues)').all();
-    if (!columns.some((column) => column.name === 'user_id')) {
+    const has = (name) => columns.some((column) => column.name === name);
+    if (!has('user_id'))
         db.exec('ALTER TABLE memory_clues ADD COLUMN user_id TEXT');
-    }
+    if (!has('scene'))
+        db.exec('ALTER TABLE memory_clues ADD COLUMN scene TEXT');
     db.exec('CREATE INDEX IF NOT EXISTS memory_clues_user ON memory_clues (user_id, created_at DESC)');
+    db.exec('CREATE INDEX IF NOT EXISTS memory_clues_scene ON memory_clues (scene, user_id, created_at DESC)');
 }
 /** LIKE 里 % 和 _ 是通配符，用户关键词里的这两个字符必须转义。 */
 function escapeLike(value) {
@@ -137,6 +143,8 @@ function currentConfig(ctx, fallback) {
         isolateByUser: liveValue(raw.isolateByUser),
         othersAsGlobal: liveValue(raw.othersAsGlobal),
         debugSender: liveValue(raw.debugSender),
+        isolationScope: liveValue(raw.isolationScope) === 'user+scene' ? 'user+scene' : 'user',
+        sceneMap: liveValue(raw.sceneMap),
         senderPatterns: liveValue(raw.senderPatterns),
         sceneOverrides: liveValue(raw.sceneOverrides),
     };
@@ -163,6 +171,8 @@ function resolveConfig(config) {
         senderPatterns: normalizePatterns(liveValue(config?.senderPatterns)),
         othersAsGlobal: liveValue(config?.othersAsGlobal) !== false,
         debugSender: liveValue(config?.debugSender) === true,
+        isolationScope: liveValue(config?.isolationScope) === 'user+scene' ? 'user+scene' : 'user',
+        sceneMap: normalizeSceneMap(liveValue(config?.sceneMap)),
         sceneOverrides: normalizeScenes(liveValue(config?.sceneOverrides)),
     };
 }
@@ -213,13 +223,43 @@ function normalizeScenes(value) {
     }
     return result;
 }
+/** 场景映射表：键是正则，值是场景名；写坏的正则直接丢弃。 */
+function normalizeSceneMap(value) {
+    if (value === null || typeof value !== 'object')
+        return {};
+    const result = {};
+    for (const [pattern, scene] of Object.entries(value)) {
+        if (typeof scene !== 'string' || scene.trim() === '')
+            continue;
+        try {
+            new RegExp(pattern, 'i');
+        }
+        catch {
+            continue;
+        }
+        result[pattern] = scene.trim().toLowerCase();
+    }
+    return result;
+}
 /**
  * 当前会话属于哪个场景。
- * DSH 的 SessionHeader 没有独立的渠道字段：外部接入（QQ/微信）通常以自己的 agent 预设建会话，
- * 所以优先 agentPreset，其次 origin，最后 default。
+ * DSH 的 SessionHeader 没有独立的渠道字段：外部接入（QQ/微信）通常以自己的 agent 预设建会话。
+ * 先看 sceneMap（可匹配 preset / origin / 会话 id / cwd），再退回 agentPreset → origin → default。
  */
-export function sceneOf(session) {
+export function sceneOf(session, sceneMap = {}) {
     const header = session.header ?? {};
+    const candidates = [header.agentPreset, header.origin, session.id, header.cwd].filter((value) => typeof value === 'string' && value.trim() !== '');
+    for (const [pattern, scene] of Object.entries(sceneMap)) {
+        let regex;
+        try {
+            regex = new RegExp(pattern, 'i');
+        }
+        catch {
+            continue;
+        }
+        if (candidates.some((value) => regex.test(value)))
+            return scene;
+    }
     const preset = typeof header.agentPreset === 'string' ? header.agentPreset.trim().toLowerCase() : '';
     if (preset !== '')
         return preset;
@@ -264,9 +304,9 @@ export function storeClue(db, clue) {
         throw new Error('storeClue: keywords 和 seedTokens 都不能为空');
     }
     const result = db
-        .prepare(`INSERT INTO memory_clues (session_id, user_id, created_at, keywords, seed_tokens, summary)
-       VALUES (?, ?, ?, ?, ?, ?)`)
-        .run(clue.sessionId ?? null, clue.userId ?? null, clue.createdAt ?? Date.now(), keywords, seedTokens, clue.summary ?? null);
+        .prepare(`INSERT INTO memory_clues (session_id, user_id, scene, created_at, keywords, seed_tokens, summary)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(clue.sessionId ?? null, clue.userId ?? null, clue.scene ?? null, clue.createdAt ?? Date.now(), keywords, seedTokens, clue.summary ?? null);
     return Number(result.lastInsertRowid);
 }
 /** 便捷入口：自己开库、写入、关库。seed 脚本和 Phase 2 钩子都可以直接用。 */
@@ -279,33 +319,33 @@ export function rememberClue(dbPath, clue) {
         db.close();
     }
 }
-/**
- * 按关键词模糊匹配线索，命中的“线索词”权重 2、“残留片段”权重 1，
- * 同分按时间倒序。用 LIKE 而不是 FTS5：中文不分词，线索本来就短。
- *
- * userId 为空表示没法识别发送者（退化为全局模式）；scope 控制可见范围：
- * - auto：自己的 + 全群共享的
- * - user：只看自己的（识别不到发送者时退化为 auto）
- * - global：只看全群共享的
- */
-export function searchClues(db, keyword, limit, userId, scope = 'auto') {
+export function searchClues(db, keyword, limit, options = {}) {
     const pattern = `%${escapeLike(keyword)}%`;
+    const scope = options.scope ?? 'auto';
+    const userId = options.userId;
+    const scene = options.scene;
+    const hasUser = typeof userId === 'string' && userId !== '';
+    const perScene = options.isolationScope === 'user+scene' && hasUser && typeof scene === 'string' && scene !== '';
     const filterParts = [];
     const filterValues = [];
     if (scope === 'global') {
         filterParts.push('user_id IS NULL');
     }
-    else if (scope === 'user' && typeof userId === 'string' && userId !== '') {
-        filterParts.push('user_id = ?');
+    else if (scope === 'user' && hasUser) {
+        filterParts.push(perScene ? '(user_id = ? AND scene = ?)' : 'user_id = ?');
         filterValues.push(userId);
+        if (perScene)
+            filterValues.push(scene);
     }
-    else if (typeof userId === 'string' && userId !== '') {
-        filterParts.push('(user_id = ? OR user_id IS NULL)');
+    else if (hasUser) {
+        filterParts.push(perScene ? '((user_id = ? AND scene = ?) OR user_id IS NULL)' : '(user_id = ? OR user_id IS NULL)');
         filterValues.push(userId);
+        if (perScene)
+            filterValues.push(scene);
     }
     const filter = filterParts.length > 0 ? ` AND (${filterParts.join(' OR ')})` : '';
     const rows = db
-        .prepare(`SELECT id, created_at, keywords, seed_tokens, summary, user_id,
+        .prepare(`SELECT id, created_at, keywords, seed_tokens, summary, user_id, scene,
               (CASE WHEN keywords    LIKE ? ${LIKE_ESCAPE} THEN 2 ELSE 0 END
              + CASE WHEN seed_tokens LIKE ? ${LIKE_ESCAPE} THEN 1 ELSE 0 END) AS score
          FROM memory_clues
@@ -782,7 +822,7 @@ export function installForgettingHook(ctx, readSettings, connection) {
             if (session === undefined)
                 return await next();
             // 先认场景，再用「全局默认 + 场景覆盖」算出生效值
-            const scene = sceneOf(session);
+            const scene = sceneOf(session, settings.sceneMap);
             const effective = resolveScene(settings, scene);
             if (!effective.autoForget)
                 return await next();
@@ -817,6 +857,7 @@ export function installForgettingHook(ctx, readSettings, connection) {
                 storeClue(db, {
                     sessionId,
                     userId: entry.userId,
+                    scene,
                     keywords: entry.clue.keywords,
                     seedTokens: entry.clue.seedTokens,
                     summary: entry.clue.summary,
@@ -854,8 +895,9 @@ export function installForgettingHook(ctx, readSettings, connection) {
             // 诊断探针：排查「桥接到底把发送者写成什么前缀」时打开 debugSender
             if (effective.debugSender) {
                 const probe = senderFromPayload(payload, effective.senderPatterns) ?? senderOfSession(session, effective.senderPatterns);
-                ctx.logger?.info?.(`full-life-memory: sender probe preset=${JSON.stringify(session.header?.agentPreset ?? null)} ` +
-                    `sender=${JSON.stringify(probe ?? null)} groups=${groups.length} ` +
+                ctx.logger?.info?.(`full-life-memory: sender probe scene=${JSON.stringify(scene)} ` +
+                    `preset=${JSON.stringify(session.header?.agentPreset ?? null)} ` +
+                    `sender=${JSON.stringify(probe ?? null)} scope=${effective.isolationScope} groups=${groups.length} ` +
                     `sample=${JSON.stringify((groups[0]?.texts[0] ?? '').slice(0, 120))}`);
             }
         }
@@ -963,11 +1005,17 @@ export function apply(ctx, config) {
             const scope = rawScope === 'user' || rawScope === 'global' ? rawScope : 'auto';
             const settings = readSettings();
             const session = exec?.agent?.session;
+            const scene = session !== undefined ? sceneOf(session, settings.sceneMap) : undefined;
             // 找不到会话或识别不出发送者时，userId 为空 → 查询退化为全局（不报错）
             const userId = settings.isolateByUser && session !== undefined
                 ? senderOfSession(session, settings.senderPatterns)
                 : undefined;
-            const clues = searchClues(connection(settings.dbPath), keyword, settings.limit, userId, scope);
+            const clues = searchClues(connection(settings.dbPath), keyword, settings.limit, {
+                userId,
+                scope,
+                scene,
+                isolationScope: settings.isolationScope,
+            });
             if (clues.length === 0) {
                 return { found: false, keyword, count: 0, scope, userId: userId ?? '', prompt: buildEmptyPrompt(keyword) };
             }

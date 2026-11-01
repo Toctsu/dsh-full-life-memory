@@ -31,7 +31,15 @@
         #   - '^\[(?:user|uid|qq|用户)\s*[:：]\s*([^\]]{1,64})\]'
         #   - '^([^:：]{1,32})[:：]'
 
-        # 场景覆盖：键 = 会话 header.agentPreset（QQ / 微信等接入插件用它建会话）
+        # 隔离粒度：user = 同一个人跨群共享；user+scene = 同一个群内才共享（更严格）
+        isolationScope: user
+
+        # 场景兜底：桥接不设 agentPreset 时，用正则匹配 preset / origin / 会话 id / cwd
+        # sceneMap:
+        #   '^qq-': qqbot
+        #   'napcat|astrbot': qqbot
+
+        # 场景覆盖：键 = 场景名（agentPreset 或 sceneMap 的结果）
         # 只写需要覆盖的字段；没写的字段继承上面的全局值。
         # 未匹配到的会话一律走全局默认。
         sceneOverrides: {}
