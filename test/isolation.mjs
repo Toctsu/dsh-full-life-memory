@@ -20,7 +20,7 @@ const disposers = []
 const SYSTEM = { id: 'sys', role: 'system', content: [{ type: 'text', text: 'SYSTEM' }], source: { kind: 'system-prompt' } }
 
 /** 每轮：user(text) → assistant(reply) → tool/result → turn/end。 */
-function buildSession({ turns, header = { agentPreset: 'qqbot' }, textFor }) {
+function buildSession({ turns, header = { agentPreset: 'qqbot' }, textFor = (turn) => `[User: 10001] 第${turn}轮` }) {
   const log = []
   const nodes = []
   const push = (type, data) => {
@@ -145,10 +145,32 @@ try {
     assert.equal(mod.extractSenderId('[用户: 998877] 在吗'), '998877')
     assert.equal(mod.extractSenderId('小明(123456): 你好'), '123456')
     assert.equal(mod.extractSenderId('qq: 10002 在吗'), '10002')
+    // AstrBot 常见的「昵称: 内容」
+    assert.equal(mod.extractSenderId('小明: 我的猫叫豆豆'), '小明')
+    assert.equal(mod.extractSenderId('[小红]: 在吗'), '小红')
+    // 常见词不当成昵称，时间不当成昵称
+    assert.equal(mod.extractSenderId('注意: 明天开会'), undefined)
+    assert.equal(mod.extractSenderId('12:30 开会'), undefined)
     assert.equal(mod.extractSenderId('没有前缀的普通消息'), undefined)
     assert.equal(mod.extractSenderId(''), undefined)
     // 写坏的正则不会让插件崩，直接跳过
     assert.equal(mod.extractSenderId(`${A} hi`, ['([', '\\[User:\\s*(\\d+)\\]']), '10001')
+  }
+
+  // ------------------------------------------- 合并消息逐行归属 + 前缀清洗
+  {
+    const merged = '小明: 我的猫叫豆豆\n小红: 我的狗叫旺财'
+    const segments = mod.splitBySender(merged)
+    assert.deepEqual(segments.map((segment) => segment.sender), ['小明', '小红'])
+    assert.deepEqual(segments.map((segment) => segment.text), ['小明: 我的猫叫豆豆', '小红: 我的狗叫旺财'])
+  }
+
+  // ------------------------------------------------- 前缀 / CQ 码不进线索词
+  {
+    const cleaned = mod.cleanForClues('[CQ:at,qq=999] [User: 10001] 我的猫叫豆豆')
+    assert.ok(!cleaned.includes('CQ'), 'CQ codes are stripped')
+    assert.ok(!cleaned.includes('10001'), 'sender prefix is stripped')
+    assert.match(cleaned, /豆豆/)
   }
 
   // -------------------------------------------------------- 折叠按人分组
@@ -174,6 +196,44 @@ try {
     assert.doesNotMatch(mine.keywords, /旺财/)
     assert.match(shared.keywords, /旺财/)
     assert.doesNotMatch(shared.keywords, /豆豆/)
+  }
+
+  // -------------------------------------- 合并消息：逐行归属，不整条算给第一个人
+  {
+    const session = buildSession({
+      turns: 7,
+      textFor: (turn) => {
+        if (turn === 1) return '小明: 我的猫叫豆豆\n小红: 我的狗叫旺财'
+        if (turn === 7) return '小红: 在吗'
+        return turn % 2 === 1 ? `${A} 第${turn}轮` : `${B} 第${turn}轮`
+      },
+    })
+    const { ctx, handlers } = fakeCtx(9000)
+    mod.apply(ctx, { dbPath: dbPath + '.merged', autoForget: true, forgetThresholdTokens: 8000, isolateByUser: true })
+    await run(handlers, { agent: { id: 'sess-1', session }, turn: 7, step: 1, signal: { aborted: false } })
+
+    const stored = rows(dbPath + '.merged')
+    const mine = stored.find((row) => row.user_id === '小红')
+    const shared = stored.find((row) => row.user_id === null)
+    assert.ok(mine, 'last line of a merged message is the current speaker')
+    assert.match(mine.keywords, /旺财/)
+    assert.doesNotMatch(mine.keywords, /豆豆/)
+    assert.ok(shared)
+    assert.match(shared.keywords, /豆豆/)
+  }
+
+  // ------------------------------- 多会话互不吞折叠（lastCutTurn 按会话记录）
+  {
+    const first = buildSession({ turns: 7, header: { agentPreset: 'qqbot' } })
+    const second = buildSession({ turns: 7, header: { agentPreset: 'qqbot' } })
+    const firstBefore = first.surface.nodes.length
+    const secondBefore = second.surface.nodes.length
+    const { ctx, handlers } = fakeCtx(9000)
+    mod.apply(ctx, { dbPath: dbPath + '.multi', autoForget: true, forgetThresholdTokens: 8000 })
+    await run(handlers, { agent: { id: 's1', session: first }, turn: 7, step: 1, signal: { aborted: false } })
+    await run(handlers, { agent: { id: 's2', session: second }, turn: 7, step: 1, signal: { aborted: false } })
+    assert.equal(first.surface.nodes.length, firstBefore - 6 + 1, 'first session folds')
+    assert.equal(second.surface.nodes.length, secondBefore - 6 + 1, 'second session folds at the same turn number')
   }
 
   // ------------------------------------------- othersAsGlobal=false 直接跳过

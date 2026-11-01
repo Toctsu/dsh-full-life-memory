@@ -8,7 +8,7 @@
 像人一样遗忘，也像人一样回忆。</p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-0.4.0-6d5efc?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.4.1-6d5efc?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-1fc8b3?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/node-%E2%89%A5%2024-339933?style=flat-square&logo=node.js&logoColor=white" alt="node" />
   <img src="https://img.shields.io/badge/dependencies-0-52525b?style=flat-square" alt="zero dependencies" />
@@ -172,6 +172,28 @@ sceneOverrides:
 ```
 
 旧库不用手动处理：启动时检测 `memory_clues` 缺 `user_id` 就自动 `ALTER TABLE` 补上，历史线索保留为共享记忆（`user_id` 为 `NULL`），新折叠的才按人归档。
+
+### 🔌 NapCat / AstrBot 这类桥接的兼容
+
+桥接插件不会给 DSH 传结构化发送者，只能从正文里读。为了少踩坑，做了四件事：
+
+| 场景 | 处理 |
+|---|---|
+| `昵称: 内容`（AstrBot 常见） | 新增昵称前缀正则；`注意:`、`12:30` 这类不会误判 |
+| 一条 prompt 合并多个发言人 | **逐行**识别，按行归属，不再整条算给第一个人 |
+| `[CQ:at,qq=…]`、`[User: 123]` | 蒸馏前剥掉，不会变成线索词 |
+| 格式对不上、识别失败 | 退化成全群共享，不报错；日志里 `owners: global` 能看出来 |
+
+排查格式时打开 `debugSender: true`，折叠时会打印：
+
+```text
+full-life-memory: sender probe preset="qqbot" sender="小明" groups=2 sample="我的猫叫豆豆"
+```
+
+还有两个边界要记住：
+
+- **纯昵称做键不稳定**（改名、同名）；能让桥接带上 QQ 号就带 `[User: 12345]`，比昵称可靠。
+- **桥接必须按群复用 DSH Session**；如果每次请求都新建会话，永远凑不出「已完成轮次」，折叠不会触发。
 
 ## 🛠 设置界面
 

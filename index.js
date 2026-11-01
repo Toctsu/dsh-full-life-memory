@@ -24,16 +24,22 @@ export const name = 'full-life-memory';
 /** tools 是硬依赖；tokenMeter / compaction / settings 都按需 ctx.get()，装没装都能跑。 */
 export const inject = ['tools'];
 /**
- * 从用户消息里猜发送者的默认正则（取第一个捕获组）。
+ * 从用户消息里猜发送者的默认正则（取最后一个非空捕获组）。
  * QQ / 微信桥接插件没有统一的 metadata，通常把发送者写在正文前缀里，
- * 所以这里覆盖几种常见写法；具体部署可在 senderPatterns 里覆盖。
+ * 所以这里覆盖几种常见写法（含 AstrBot 常见的「昵称: 内容」）；具体部署可在 senderPatterns 里覆盖。
  */
 const DEFAULT_SENDER_PATTERNS = [
     '\\[(?:user|uid|qq|sender|from|用户|发送者|成员|群友)\\s*[:：=]\\s*([^\\]\\s]{1,64})\\]',
     '^\\s*\\[(\\d{5,12})\\]',
     '^\\s*([^\\s:：]{1,32})[（(](\\d{5,12})[)）]\\s*[:：]',
     '^\\s*(?:qq|user|uid)\\s*[:=]\\s*(\\d{5,12})\\b',
+    // 「昵称: 内容」/「[昵称]: 内容」：要求名字里至少有一个字母或汉字，避免把 12:30、http:// 当成发送者
+    '^\\s*\\[?([^\\s:：\\[\\]（）()]*[\\p{L}\\u4e00-\\u9fa5][^\\s:：\\[\\]（）()]{0,31})\\]?\\s*[:：](?!//)\\s*',
 ];
+/** 容易被「昵称:」误判成发送者的常见词。 */
+const SENDER_STOPWORDS = new Set([
+    '注意', '提示', '警告', '备注', '说明', '系统', '公告', '更新', '时间', 'ps', 'p.s.', 'note', 're',
+]);
 /**
  * 场景覆盖：键是场景标识（会话 header.agentPreset，缺省时用 origin，最后回落到 default）。
  * 只有写出来的字段才覆盖全局值。
@@ -60,6 +66,7 @@ export const Config = z.object({
     isolateByUser: z.boolean().default(false).volatile(),
     senderPatterns: z.array(z.string()).default([...DEFAULT_SENDER_PATTERNS]).volatile(),
     othersAsGlobal: z.boolean().default(true).volatile(),
+    debugSender: z.boolean().default(false).volatile(),
     sceneOverrides: z.dict(SceneSchema).default({}).volatile(),
 });
 const DEFAULT_DB_PATH = join(homedir(), '.dsh', 'full-life-memory', 'memory.db');
@@ -127,6 +134,10 @@ function currentConfig(ctx, fallback) {
         forgetThresholdTokens: liveValue(raw.forgetThresholdTokens),
         forgetTurns: liveValue(raw.forgetTurns),
         keepCompletedTurns: liveValue(raw.keepCompletedTurns),
+        isolateByUser: liveValue(raw.isolateByUser),
+        othersAsGlobal: liveValue(raw.othersAsGlobal),
+        debugSender: liveValue(raw.debugSender),
+        senderPatterns: liveValue(raw.senderPatterns),
         sceneOverrides: liveValue(raw.sceneOverrides),
     };
 }
@@ -151,6 +162,7 @@ function resolveConfig(config) {
         isolateByUser: liveValue(config?.isolateByUser) === true,
         senderPatterns: normalizePatterns(liveValue(config?.senderPatterns)),
         othersAsGlobal: liveValue(config?.othersAsGlobal) !== false,
+        debugSender: liveValue(config?.debugSender) === true,
         sceneOverrides: normalizeScenes(liveValue(config?.sceneOverrides)),
     };
 }
@@ -442,10 +454,55 @@ export function extractSenderId(text, patterns = DEFAULT_SENDER_PATTERNS) {
         // 取最后一个非空捕获组：像「小明(123456):」这种模式，名字在第一组、ID 在第二组
         const groups = match.slice(1).filter((part) => typeof part === 'string' && part.trim() !== '');
         const value = groups[groups.length - 1];
-        if (typeof value === 'string')
-            return value.trim();
+        if (typeof value !== 'string')
+            continue;
+        const trimmed = value.trim();
+        if (SENDER_STOPWORDS.has(trimmed.toLowerCase()))
+            continue;
+        return trimmed;
     }
     return undefined;
+}
+/**
+ * 按换行拆段并逐行识别发送者。
+ * 群聊里用户连发几条、桥接合并成一条 prompt 时，这样才不会把整段都算给第一个人。
+ */
+export function splitBySender(text, patterns = DEFAULT_SENDER_PATTERNS) {
+    if (typeof text !== 'string' || text.trim() === '')
+        return [];
+    const segments = [];
+    for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed === '')
+            continue;
+        segments.push({ sender: extractSenderId(trimmed, patterns), text: trimmed });
+    }
+    return segments.length > 0 ? segments : [{ text }];
+}
+/**
+ * 蒸馏前清洗：去掉 CQ 码、行首发送者前缀、行首 @提及，避免它们变成线索词。
+ * 只处理开头的匹配，正文里出现的方括号/冒号保持原样。
+ */
+export function cleanForClues(text, patterns = DEFAULT_SENDER_PATTERNS) {
+    if (typeof text !== 'string')
+        return '';
+    let value = text.replace(/\[CQ:[^\]]*\]/g, ' ').trim();
+    for (const source of patterns) {
+        let regex;
+        try {
+            regex = new RegExp(source, 'i');
+        }
+        catch {
+            continue;
+        }
+        const match = regex.exec(value);
+        if (match !== null && match.index === 0) {
+            value = value.slice(match[0].length);
+            break;
+        }
+    }
+    value = value.replace(/^(?:@\S+\s*)+/u, ' ');
+    return value.replace(/[ \t]+/g, ' ').trim();
 }
 /** 当前会话“最近一条用户消息”的发送者；取不到就是 undefined（走全局模式）。 */
 export function senderOfSession(session, patterns) {
@@ -455,7 +512,14 @@ export function senderOfSession(session, patterns) {
         if (event?.type !== 'user/message')
             continue;
         const message = session.deriveEventMessage?.(event) ?? event.data;
-        return extractSenderId(messageText(message), patterns);
+        const segments = splitBySender(messageText(message), patterns);
+        // 合并消息里最后一个带前缀的人才是“当前说话的人”
+        for (let position = segments.length - 1; position >= 0; position -= 1) {
+            const sender = segments[position]?.sender;
+            if (sender !== undefined)
+                return sender;
+        }
+        return undefined;
     }
     return undefined;
 }
@@ -465,9 +529,13 @@ function senderFromPayload(payload, patterns) {
     if (!Array.isArray(messages))
         return undefined;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const sender = extractSenderId(messageText(messages[index]), patterns);
-        if (sender !== undefined)
-            return sender;
+        const message = messages[index];
+        const segments = splitBySender(messageText(message), patterns);
+        for (let position = segments.length - 1; position >= 0; position -= 1) {
+            const sender = segments[position]?.sender;
+            if (sender !== undefined)
+                return sender;
+        }
     }
     return undefined;
 }
@@ -480,7 +548,8 @@ function senderFromPayload(payload, patterns) {
 export function groupTextsBySender(session, seqs, options, currentSender) {
     const groups = new Map();
     const push = (userId, text) => {
-        if (text.trim() === '')
+        const cleaned = cleanForClues(text, options.senderPatterns);
+        if (cleaned === '')
             return;
         const key = userId ?? '';
         let group = groups.get(key);
@@ -488,22 +557,14 @@ export function groupTextsBySender(session, seqs, options, currentSender) {
             group = { userId, texts: [] };
             groups.set(key, group);
         }
-        group.texts.push(text);
+        group.texts.push(cleaned);
     };
     const isolate = options.isolateByUser && typeof currentSender === 'string' && currentSender !== '';
     let speaker = null;
-    for (const seq of seqs) {
-        const event = session.eventAt(seq);
-        if (event === undefined)
-            continue;
-        const message = session.deriveEventMessage?.(event) ?? event.data;
-        const text = messageText(message);
-        if (event.type === 'user/message') {
-            speaker = extractSenderId(text, options.senderPatterns) ?? null;
-        }
+    const attribute = (text) => {
         if (!isolate) {
             push(null, text);
-            continue;
+            return;
         }
         if (speaker !== null && speaker === currentSender) {
             push(speaker, text);
@@ -512,6 +573,23 @@ export function groupTextsBySender(session, seqs, options, currentSender) {
             push(null, text);
         }
         // othersAsGlobal=false：别人的对话直接跳过，不留任何痕迹
+    };
+    for (const seq of seqs) {
+        const event = session.eventAt(seq);
+        if (event === undefined)
+            continue;
+        const message = session.deriveEventMessage?.(event) ?? event.data;
+        const text = messageText(message);
+        if (event.type !== 'user/message') {
+            attribute(text);
+            continue;
+        }
+        // 一条消息里可能合并了多个发言人：逐行归属，而不是整条算给第一个人
+        for (const segment of splitBySender(text, options.senderPatterns)) {
+            if (segment.sender !== undefined)
+                speaker = segment.sender;
+            attribute(segment.text);
+        }
     }
     return [...groups.values()];
 }
@@ -695,7 +773,8 @@ function createNoticeMessage(text, compactionId) {
  * 真正切历史靠 session.append 的 surfaceOp.replace，也就是 compaction 用的同一条路径。
  */
 export function installForgettingHook(ctx, readSettings, connection) {
-    let lastCutTurn = -1;
+    // 每个会话各自记“上一次切到第几轮”，不能跨会话共享（QQ 群 + 桌面会互相吞掉折叠）
+    const lastCutTurn = new WeakMap();
     ctx.on('agent/pre-step', async (payload, next) => {
         try {
             const settings = readSettings();
@@ -710,7 +789,7 @@ export function installForgettingHook(ctx, readSettings, connection) {
             if (payload.signal?.aborted === true)
                 return await next();
             // 同一轮只切一次，避免一步一刀把当前轮掏空。
-            if (payload.turn === lastCutTurn)
+            if (payload.turn === lastCutTurn.get(session))
                 return await next();
             const tokens = measureTokens(ctx, session);
             if (tokens < effective.forgetThresholdTokens)
@@ -767,11 +846,18 @@ export function installForgettingHook(ctx, readSettings, connection) {
                 // 无论替换是否成功都闭合事务，避免留下会锁住真实 compaction 的 unpaired start。
                 session.append('compaction/end', { compactionId, turn: payload.turn });
             }
-            lastCutTurn = payload.turn;
+            lastCutTurn.set(session, payload.turn);
             const owners = clues.map((entry) => entry.userId ?? 'global').join(', ');
             ctx.logger?.info?.(`full-life-memory: folded ${span.turns.length} turn(s) (~${tokens} tokens) in scene "${scene}" ` +
                 `from surface seq ${span.startSeq}..${span.endSeq} as compaction ${compactionId}; ` +
                 `clues: ${clues.map((entry) => entry.clue.keywords.join('/')).join(' | ')}; owners: ${owners}`);
+            // 诊断探针：排查「桥接到底把发送者写成什么前缀」时打开 debugSender
+            if (effective.debugSender) {
+                const probe = senderFromPayload(payload, effective.senderPatterns) ?? senderOfSession(session, effective.senderPatterns);
+                ctx.logger?.info?.(`full-life-memory: sender probe preset=${JSON.stringify(session.header?.agentPreset ?? null)} ` +
+                    `sender=${JSON.stringify(probe ?? null)} groups=${groups.length} ` +
+                    `sample=${JSON.stringify((groups[0]?.texts[0] ?? '').slice(0, 120))}`);
+            }
         }
         catch (error) {
             ctx.logger?.warn?.(`full-life-memory: forget skipped: ${error instanceof Error ? error.message : String(error)}`);
