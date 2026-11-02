@@ -1,32 +1,76 @@
 name: Sync AstrBot Plugin
 
+# 把 astrbot/ 目录同步到独立的 AstrBot 插件仓库。
+# 目标仓库根目录必须直接是插件文件（main.py / metadata.yaml 同级）。
+#
+# 需要的 secret：PAT_TOKEN
+#   - classic PAT：勾 repo
+#   - fine-grained PAT：目标仓库 Contents = Read and write
+# 配在 主仓库 → Settings → Secrets and variables → Actions。
+
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
-      - 'astrbot/**'  # 只有 astrbot 目录变化时才触发
-  workflow_dispatch:   # 允许手动触发
+      - 'astrbot/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout main repo
-        uses: actions/checkout@v3
+      - name: Checkout source
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # 必须全量拉取才能做 subtree
+          path: source
 
-      - name: Split and Push to AstrBot Repo
-        env:
-          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+      - name: Checkout plugin repository
+        uses: actions/checkout@v4
+        with:
+          repository: Toctsu/astrbot_plugin_full_life_memory
+          token: ${{ secrets.PAT_TOKEN }}
+          path: target
+
+      - name: Copy plugin files
         run: |
-          # 配置 git 身份
-          git config --global user.name "GitHub Action"
-          git config --global user.email "action@github.com"
-          
-          # 提取 astrbot 目录
-          git subtree split -P astrbot -b astrbot-sync
-          
-          # 推送到目标仓库
-          git push https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Toctsu/astrbot_plugin_full_life_memory.git astrbot-sync:main -f
+          set -e
+          for file in main.py memory.py metadata.yaml _conf_schema.json README.md; do
+            if [ ! -f "source/astrbot/$file" ]; then
+              echo "::error::source/astrbot/$file 不存在"
+              exit 1
+            fi
+          done
+
+          # 只清理插件自己的文件，保留目标仓库里的 logo.png 等资源
+          rm -f target/main.py target/memory.py target/metadata.yaml \
+                target/_conf_schema.json target/README.md
+
+          cp source/astrbot/main.py \
+             source/astrbot/memory.py \
+             source/astrbot/metadata.yaml \
+             source/astrbot/_conf_schema.json \
+             source/astrbot/README.md \
+             target/
+
+          ls -la target
+
+      - name: Commit and push
+        run: |
+          set -e
+          cd target
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "没有变化，跳过提交"
+            exit 0
+          fi
+
+          git commit -m "sync: ${GITHUB_SHA::7} from ${GITHUB_REPOSITORY}"
+          # 目标仓库为空时也要推得出去
+          git branch -M main
+          git push -u origin main
