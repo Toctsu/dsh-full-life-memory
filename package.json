@@ -1,6 +1,6 @@
 {
   "name": "@tuhengyu/dsh-full-life-memory",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "仿生终身记忆：上下文放不下时把旧轮次蒸馏成 token 线索并从历史切除，需要时用 recall_from_clues 把线索重建成回忆。",
   "keywords": [
     "dsh-plugin",
@@ -14,6 +14,9 @@
   "type": "module",
   "main": "index.js",
   "types": "index.ts",
+  "bin": {
+    "flm": "./bin/flm.mjs"
+  },
   "engines": {
     "node": ">=24"
   },
@@ -30,6 +33,8 @@
     "index.js",
     "index.ts",
     "client.js",
+    "bin/",
+    "astrbot/",
     "cordis.patch.yml",
     "tsconfig.json",
     "README.md",

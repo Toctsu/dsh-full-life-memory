@@ -281,7 +281,7 @@ export function resolveScene(settings, scene) {
     };
 }
 /** 打开（并按需创建）线索库；PRAGMA 放在这里，所有入口共享同一套设置。 */
-function openDb(dbPath) {
+export function openDb(dbPath) {
     mkdirSync(dirname(dbPath), { recursive: true });
     const db = new DatabaseSync(dbPath);
     db.exec('PRAGMA journal_mode = WAL');
