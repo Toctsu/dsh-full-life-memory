@@ -6,6 +6,7 @@
 - 命中触发词（记得 / 上次 / 之前 …）时，回忆一次并注入 system prompt
 - 每个群友 2 分钟内最多回忆一次，避免每条消息都查库
 - 任何异常（库不存在、CLI 超时）都静默跳过，绝不影响正常回复
+- 旧版库（0.3.x，缺 user_id/scene）会自动补列，不用手动迁移
 """
 
 from __future__ import annotations
@@ -50,13 +51,14 @@ def _memory_module() -> Any:
     "full_life_memory",
     "tuhengyu",
     "把 DSH 终身记忆的线索注入群聊上下文（纯 Python 读取，无需 Node）",
-    "0.7.0",
+    "0.7.1",
 )
 class FullLifeMemory(Star):
     def __init__(self, context: Context, config: dict[str, Any] | None = None) -> None:
         super().__init__(context)
         self.config = config or {}
         self._last_recall: dict[str, float] = {}
+        self._legacy_warned = False
 
     # ------------------------------------------------------------------ 配置
     def _cfg(self, key: str, default: Any) -> Any:
@@ -98,15 +100,35 @@ class FullLifeMemory(Star):
     # ------------------------------------------------------------ 两种后端
     def _recall_python(self, text: str, user: str) -> str:
         module = _memory_module()
-        result = module.recall(
-            self._db_path(),
-            text=text,
-            user_id=user or None,
-            scene=str(self._cfg("scene", "qqbot")),
-            limit=int(self._cfg("limit", 5)),
-            isolation=self._isolation(),
-            scope="auto",
-        )
+        db_path = self._db_path()
+
+        def query() -> dict[str, Any]:
+            return module.recall(
+                db_path,
+                text=text,
+                user_id=user or None,
+                scene=str(self._cfg("scene", "qqbot")),
+                limit=int(self._cfg("limit", 5)),
+                isolation=self._isolation(),
+                scope="auto",
+            )
+
+        result = query()
+
+        # 旧库（0.3.x）没有 user_id / scene：就地补列再查一次，避免用户手动迁移
+        if result.get("schema") == "legacy":
+            try:
+                module.migrate(db_path)
+                result = query()
+                logger.info("[full_life_memory] 旧版记忆库已自动升级（补充 user_id / scene 列）")
+            except Exception as exc:
+                if not self._legacy_warned:
+                    self._legacy_warned = True
+                    logger.warning(
+                        f"[full_life_memory] 记忆库是旧版结构且无法自动升级（{exc}），本次按全局读取；"
+                        "可运行 python memory.py migrate --db <库路径>"
+                    )
+
         return str(result.get("prompt") or "") if result.get("found") else ""
 
     async def _recall_cli(self, text: str, user: str) -> str:

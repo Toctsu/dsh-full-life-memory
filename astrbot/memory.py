@@ -39,6 +39,10 @@ def connect(db_path: str) -> sqlite3.Connection | None:
     return conn
 
 
+def columns_of(conn: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in conn.execute("PRAGMA table_info(memory_clues)")}
+
+
 def search(
     conn: sqlite3.Connection,
     keyword: str,
@@ -49,12 +53,20 @@ def search(
     scope: str = "auto",
 ) -> list[dict[str, Any]]:
     pattern = f"%{_escape_like(keyword)}%"
-    has_user = isinstance(user_id, str) and user_id != ""
-    per_scene = isolation == "user+scene" and has_user and isinstance(scene, str) and scene != ""
+
+    # 0.3.x 的库没有 user_id / scene：按全局模式读，别让旧库直接报错
+    available = columns_of(conn)
+    db_has_user = "user_id" in available
+    db_has_scene = "scene" in available
+
+    has_user = db_has_user and isinstance(user_id, str) and user_id != ""
+    per_scene = db_has_scene and isolation == "user+scene" and has_user and isinstance(scene, str) and scene != ""
 
     clauses: list[str] = []
     values: list[str] = []
-    if scope == "global":
+    if not db_has_user:
+        pass  # 老库没有隔离列，只能全量查
+    elif scope == "global":
         clauses.append("user_id IS NULL")
     elif scope == "user" and has_user:
         if per_scene:
@@ -73,8 +85,11 @@ def search(
 
     filter_sql = f" AND ({' OR '.join(clauses)})" if clauses else ""
 
+    user_column = "user_id" if db_has_user else "NULL AS user_id"
+    scene_column = "scene" if db_has_scene else "NULL AS scene"
+
     sql = (
-        "SELECT id, created_at, keywords, seed_tokens, summary, user_id, scene, "
+        f"SELECT id, created_at, keywords, seed_tokens, summary, {user_column}, {scene_column}, "
         f"(CASE WHEN keywords LIKE ? {ESCAPE} THEN 2 ELSE 0 END "
         f"+ CASE WHEN seed_tokens LIKE ? {ESCAPE} THEN 1 ELSE 0 END) AS score "
         "FROM memory_clues "
@@ -170,9 +185,18 @@ def recall(
     conn = connect(db_path)
     if conn is None:
         word = (keyword or text or "").strip()[:24] or "记忆"
-        return {"ok": True, "found": False, "keyword": word, "count": 0, "prompt": empty_prompt(word)}
+        return {
+            "ok": True,
+            "found": False,
+            "keyword": word,
+            "count": 0,
+            "schema": "missing",
+            "prompt": empty_prompt(word),
+        }
 
     try:
+        available = columns_of(conn)
+        schema = "v3" if "user_id" in available else "legacy"
         clues: list[dict[str, Any]] = []
         word = (keyword or "").strip()
 
@@ -189,7 +213,39 @@ def recall(
                 word = text.strip()[:24]
 
         prompt = build_recall_prompt(word, clues, max_chars) if clues else empty_prompt(word)
-        return {"ok": True, "found": bool(clues), "keyword": word, "count": len(clues), "prompt": prompt}
+        return {
+            "ok": True,
+            "found": bool(clues),
+            "keyword": word,
+            "count": len(clues),
+            "schema": schema,
+            "prompt": prompt,
+        }
+    finally:
+        conn.close()
+
+
+def migrate(db_path: str) -> dict[str, Any]:
+    """把 0.3.x 的旧库补上 user_id / scene 两列（幂等）。
+
+    正常情况下 DSH 打开库时会自动做；这里给"只有 AstrBot、没跑过 DSH"的人用。
+    """
+    if not os.path.exists(db_path):
+        return {"ok": False, "error": "库不存在，先让 DSH 折叠一次或手工建库"}
+    conn = sqlite3.connect(db_path, timeout=5)
+    try:
+        available = columns_of(conn)
+        added = []
+        if "user_id" not in available:
+            conn.execute("ALTER TABLE memory_clues ADD COLUMN user_id TEXT")
+            added.append("user_id")
+        if "scene" not in available:
+            conn.execute("ALTER TABLE memory_clues ADD COLUMN scene TEXT")
+            added.append("scene")
+        conn.execute("CREATE INDEX IF NOT EXISTS memory_clues_user ON memory_clues (user_id, created_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS memory_clues_scene ON memory_clues (scene, user_id, created_at DESC)")
+        conn.commit()
+        return {"ok": True, "added": added, "schema": "v3"}
     finally:
         conn.close()
 
@@ -197,12 +253,17 @@ def recall(
 def stats(db_path: str) -> dict[str, Any]:
     conn = connect(db_path)
     if conn is None:
-        return {"ok": True, "total": 0, "users": 0, "scenes": 0}
+        return {"ok": True, "total": 0, "users": 0, "scenes": 0, "schema": "missing"}
     try:
+        available = columns_of(conn)
+        schema = "v3" if "user_id" in available else "legacy"
+        if schema == "legacy":
+            row = conn.execute("SELECT count(*) AS total FROM memory_clues").fetchone()
+            return {"ok": True, "total": row["total"], "users": 0, "scenes": 0, "schema": schema}
         row = conn.execute(
             "SELECT count(*) AS total, count(DISTINCT user_id) AS users, count(DISTINCT scene) AS scenes FROM memory_clues"
         ).fetchone()
-        return {"ok": True, "total": row["total"], "users": row["users"], "scenes": row["scenes"]}
+        return {"ok": True, "total": row["total"], "users": row["users"], "scenes": row["scenes"], "schema": schema}
     finally:
         conn.close()
 
@@ -230,9 +291,15 @@ def main() -> None:
     stats_cmd = sub.add_parser("stats")
     stats_cmd.add_argument("--db", required=True)
 
+    migrate_cmd = sub.add_parser("migrate")
+    migrate_cmd.add_argument("--db", required=True)
+
     args = parser.parse_args()
     if args.command == "stats":
         print(json.dumps(stats(args.db), ensure_ascii=False))
+        return
+    if args.command == "migrate":
+        print(json.dumps(migrate(args.db), ensure_ascii=False))
         return
 
     print(

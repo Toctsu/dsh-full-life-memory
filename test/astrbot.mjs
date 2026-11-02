@@ -70,6 +70,40 @@ try {
   assert.equal(empty.found, false)
   assert.equal(empty.prompt.includes('没有留下可用的线索'), true)
 
+  // 旧库（0.3.x 结构）：能读、不报错，并可以一键补列
+  const legacy = join(dir, 'legacy.db')
+  const { DatabaseSync } = await import('node:sqlite')
+  const old = new DatabaseSync(legacy)
+  old.exec(`
+    CREATE TABLE memory_clues (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT,
+      created_at INTEGER NOT NULL,
+      keywords TEXT NOT NULL,
+      seed_tokens TEXT NOT NULL,
+      summary TEXT
+    )
+  `)
+  old.prepare('INSERT INTO memory_clues (session_id, created_at, keywords, seed_tokens) VALUES (?, ?, ?, ?)').run(
+    'old',
+    Date.now(),
+    '旧线索',
+    '旧片段',
+  )
+  old.close()
+
+  const legacyHit = runPy('recall', '--text', '旧线索', '--db', legacy, '--user', '10001')
+  assert.equal(legacyHit.found, true, 'legacy schema is readable')
+  assert.equal(legacyHit.schema, 'legacy')
+
+  const migrated = runPy('migrate', '--db', legacy)
+  assert.equal(migrated.ok, true)
+  assert.deepEqual(migrated.added, ['user_id', 'scene'])
+
+  const afterMigrate = runPy('recall', '--text', '旧线索', '--db', legacy, '--user', '10001')
+  assert.equal(afterMigrate.schema, 'v3')
+  assert.equal(afterMigrate.found, true)
+
   console.log('astrbot: OK')
 } finally {
   try { rmSync(dir, { recursive: true, force: true }) } catch { /* WAL */ }

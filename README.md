@@ -8,7 +8,7 @@
 像人一样遗忘，也像人一样回忆。</p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-0.7.0-6d5efc?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.7.1-6d5efc?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-1fc8b3?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/node-%E2%89%A5%2024-339933?style=flat-square&logo=node.js&logoColor=white" alt="node" />
   <img src="https://img.shields.io/badge/dependencies-0-52525b?style=flat-square" alt="zero dependencies" />
