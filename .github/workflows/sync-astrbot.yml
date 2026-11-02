@@ -1,0 +1,32 @@
+name: Sync AstrBot Plugin
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'astrbot/**'  # 只有 astrbot 目录变化时才触发
+  workflow_dispatch:   # 允许手动触发
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0 # 必须全量拉取才能做 subtree
+
+      - name: Split and Push to AstrBot Repo
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          # 配置 git 身份
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          
+          # 提取 astrbot 目录
+          git subtree split -P astrbot -b astrbot-sync
+          
+          # 推送到目标仓库
+          git push https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Toctsu/astrbot_plugin_full_life_memory.git astrbot-sync:main -f
