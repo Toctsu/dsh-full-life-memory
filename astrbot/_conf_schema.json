@@ -1,8 +1,8 @@
 {
-  "cli": {
+  "backend": {
     "type": "string",
-    "default": "flm",
-    "description": "调用记忆 CLI 的命令。全局安装用 flm；用源码时写 \"node /绝对路径/bin/flm.mjs\"。"
+    "default": "python",
+    "description": "python = 内置读取（纯标准库，不需要 Node）；cli = 调用 flm 命令行；auto = 内置失败时回退到 CLI。"
   },
   "db_path": {
     "type": "string",
@@ -14,24 +14,34 @@
     "default": "qqbot",
     "description": "场景标识，用来区分不同入口（qqbot / wechat / …）。"
   },
-  "timeout": {
-    "type": "float",
-    "default": 4.0,
-    "description": "单次调用 CLI 的超时（秒），超时直接跳过，不影响回复。"
-  },
-  "cache_ttl": {
-    "type": "float",
-    "default": 120.0,
-    "description": "同一个群友两次回忆之间的最小间隔（秒），避免每条消息都起子进程。"
+  "isolation": {
+    "type": "string",
+    "default": "user",
+    "description": "user = 同一个人跨群共享；user+scene = 同一个场景内才共享（更严格）。"
   },
   "limit": {
     "type": "int",
     "default": 5,
     "description": "一次取回几条线索。"
   },
+  "cache_ttl": {
+    "type": "float",
+    "default": 120.0,
+    "description": "同一个群友两次回忆之间的最小间隔（秒）。"
+  },
   "trigger_words": {
     "type": "list",
     "default": ["记得", "还记得", "之前", "上次", "以前", "那个", "说过", "聊过"],
     "description": "消息里出现这些词时才触发回忆。"
+  },
+  "cli": {
+    "type": "string",
+    "default": "flm",
+    "description": "仅 backend=cli/auto 时使用：flm，或 \"node /绝对路径/bin/flm.mjs\"。"
+  },
+  "timeout": {
+    "type": "float",
+    "default": 4.0,
+    "description": "仅 CLI 后端：单次调用超时（秒）。"
   }
 }

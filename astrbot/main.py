@@ -1,17 +1,20 @@
 """AstrBot 插件：把 DSH 终身记忆的线索注入群聊上下文。
 
-思路：AstrBot 里没有 DSH 的 agent 循环，所以不重复实现记忆逻辑，
-只用子进程调用同一份 CLI（`flm`）读写同一个 SQLite。
+默认走**纯 Python** 读取（标准库 sqlite3，不需要 Node），
+也可以配置成调用 `flm` CLI（与 DSH 完全同一份实现）。
 
 - 命中触发词（记得 / 上次 / 之前 …）时，回忆一次并注入 system prompt
-- 每个群友 2 分钟内最多回忆一次，避免每条消息都起子进程
-- CLI 超时 / 报错 / 没线索，一律静默跳过，绝不影响正常回复
+- 每个群友 2 分钟内最多回忆一次，避免每条消息都查库
+- 任何异常（库不存在、CLI 超时）都静默跳过，绝不影响正常回复
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
+import os
+import pathlib
 import shlex
 import time
 from typing import Any
@@ -26,13 +29,28 @@ except Exception:  # pragma: no cover
     ProviderRequest = Any  # type: ignore
 
 DEFAULT_TRIGGERS = ["记得", "还记得", "之前", "上次", "以前", "那个", "说过", "聊过"]
+_MEMORY_MODULE: Any = None
+
+
+def _memory_module() -> Any:
+    """按文件路径加载同目录的 memory.py，避免依赖包的导入方式。"""
+    global _MEMORY_MODULE
+    if _MEMORY_MODULE is None:
+        path = pathlib.Path(__file__).with_name("memory.py")
+        spec = importlib.util.spec_from_file_location("flm_memory", path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("memory.py 加载失败")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _MEMORY_MODULE = module
+    return _MEMORY_MODULE
 
 
 @register(
     "full_life_memory",
     "tuhengyu",
-    "把 DSH 终身记忆的线索注入群聊上下文",
-    "0.6.0",
+    "把 DSH 终身记忆的线索注入群聊上下文（纯 Python 读取，无需 Node）",
+    "0.7.0",
 )
 class FullLifeMemory(Star):
     def __init__(self, context: Context, config: dict[str, Any] | None = None) -> None:
@@ -44,6 +62,15 @@ class FullLifeMemory(Star):
     def _cfg(self, key: str, default: Any) -> Any:
         value = self.config.get(key, default)
         return default if value is None else value
+
+    def _db_path(self) -> str:
+        raw = str(self._cfg("db_path", "")).strip()
+        if raw:
+            return raw
+        return os.path.join(os.path.expanduser("~"), ".dsh", "full-life-memory", "memory.db")
+
+    def _isolation(self) -> str:
+        return "user+scene" if str(self._cfg("isolation", "user")) == "user+scene" else "user"
 
     def _command(self) -> list[str]:
         raw = str(self._cfg("cli", "flm")).strip()
@@ -68,28 +95,21 @@ class FullLifeMemory(Star):
         user = self._call(event, "get_sender_id", "get_sender_id_str")
         return group, user
 
-    # ------------------------------------------------------------ 调 CLI
-    async def _run_cli(self, args: list[str], timeout: float) -> dict[str, Any]:
-        proc = await asyncio.create_subprocess_exec(
-            *self._command(),
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    # ------------------------------------------------------------ 两种后端
+    def _recall_python(self, text: str, user: str) -> str:
+        module = _memory_module()
+        result = module.recall(
+            self._db_path(),
+            text=text,
+            user_id=user or None,
+            scene=str(self._cfg("scene", "qqbot")),
+            limit=int(self._cfg("limit", 5)),
+            isolation=self._isolation(),
+            scope="auto",
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            raise TimeoutError(f"flm 超时（>{timeout}s）")
+        return str(result.get("prompt") or "") if result.get("found") else ""
 
-        if proc.returncode != 0:
-            detail = stderr.decode("utf-8", "ignore").strip() or f"exit {proc.returncode}"
-            raise RuntimeError(detail)
-
-        return json.loads(stdout.decode("utf-8", "ignore") or "{}")
-
-    async def _recall(self, text: str, user: str) -> str:
+    async def _recall_cli(self, text: str, user: str) -> str:
         args = [
             "recall",
             "--text",
@@ -101,14 +121,42 @@ class FullLifeMemory(Star):
         ]
         if user:
             args += ["--user", user]
-        db_path = str(self._cfg("db_path", "")).strip()
-        if db_path:
-            args += ["--db", db_path]
+        if str(self._cfg("db_path", "")).strip():
+            args += ["--db", str(self._cfg("db_path", "")).strip()]
 
-        result = await self._run_cli(args, float(self._cfg("timeout", 4)))
-        if not result.get("ok") or not result.get("found"):
+        proc = await asyncio.create_subprocess_exec(
+            *self._command(),
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=float(self._cfg("timeout", 4))
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            raise TimeoutError(f"flm 超时（>{self._cfg('timeout', 4)}s）")
+
+        if proc.returncode != 0:
+            detail = stderr.decode("utf-8", "ignore").strip() or f"exit {proc.returncode}"
+            raise RuntimeError(detail)
+
+        result = json.loads(stdout.decode("utf-8", "ignore") or "{}")
+        return str(result.get("prompt") or "") if result.get("found") else ""
+
+    async def _recall(self, text: str, user: str) -> str:
+        backend = str(self._cfg("backend", "python")).lower()
+        if backend == "cli":
+            return await self._recall_cli(text, user)
+        try:
+            return self._recall_python(text, user)
+        except Exception as exc:
+            logger.warning(f"[full_life_memory] 内置读取失败：{exc}")
+            if backend == "auto":
+                return await self._recall_cli(text, user)
             return ""
-        return str(result.get("prompt") or "").strip()
 
     # ------------------------------------------------------------ 注入钩子
     @filter.on_llm_request()
@@ -153,7 +201,8 @@ class FullLifeMemory(Star):
         """用法：/recall 关键词"""
         try:
             text = str(getattr(event, "message_str", "") or "").strip()
-            keyword = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else ""
+            parts = text.split(maxsplit=1)
+            keyword = parts[1].strip() if len(parts) > 1 else ""
             if not keyword:
                 yield event.plain_result("用法：/recall 关键词")
                 return

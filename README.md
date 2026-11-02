@@ -8,7 +8,7 @@
 像人一样遗忘，也像人一样回忆。</p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-0.6.0-6d5efc?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.7.0-6d5efc?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-1fc8b3?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/node-%E2%89%A5%2024-339933?style=flat-square&logo=node.js&logoColor=white" alt="node" />
   <img src="https://img.shields.io/badge/dependencies-0-52525b?style=flat-square" alt="zero dependencies" />
@@ -221,10 +221,25 @@ isolationScope: user        # 默认：同一个人跨群共享（人设一致�
 
 `user+scene` 下查询会额外带上 `scene = 当前场景` 的条件；全群共享记忆（`user_id IS NULL`）两种粒度都可见。
 
-### 🤖 AstrBot / NapCat：对话不经过 DSH 时（CLI 模式）
+### 🤖 AstrBot / NapCat：对话不经过 DSH 时
 
 如果整条链路是 `NapCat → AstrBot → 模型`，DSH 根本不在场，插件的钩子不会执行。
-这时用 **`flm` CLI** 共享同一份记忆库：
+仓库里的 `astrbot/` 是一个独立的 AstrBot 插件，**默认用纯 Python 读取同一个 SQLite，不需要 Node**：
+
+```
+QQ 消息 ──► AstrBot ──► astrbot/ 插件 ──► memory.py (sqlite3) ──► 线索
+```
+
+安装（AstrBot 插件页 → 安装插件）：
+
+- **从链接安装**：填插件仓库地址（仓库根目录就是 `astrbot/` 的内容）
+- **从文件安装**：下载 `astrbot_plugin_full_life_memory.zip`（Release 附件）
+- 或者直接把 `astrbot/` 拷进 `data/plugins/astrbot_plugin_full_life_memory/`
+
+配置里把 `db_path` 指到 DSH 用的同一个库即可（留空默认 `~/.dsh/full-life-memory/memory.db`）。
+命中触发词（记得 / 上次 / 之前…）时回忆一次并注入 `system_prompt`，同一个群友 120 秒内只查一次。
+
+也可以用 **`flm` CLI** 自己接别的平台：
 
 ```bash
 npm i -g @tuhengyu/dsh-full-life-memory     # 安装后得到 flm 命令
@@ -233,14 +248,9 @@ flm remember --keywords "数据库,sqlite" --seed "用 node:sqlite 存线索" --
 flm stats
 ```
 
-输出是 JSON，方便任何语言调用。仓库里的 `astrbot/` 是一个现成的 AstrBot 插件外壳：
-
-- 命中触发词（记得 / 上次 / 之前…）时回忆一次，把线索拼进 `system_prompt`
-- 同一个群友 2 分钟内只查一次，避免每条消息都起 Node 进程
-- CLI 超时或报错一律静默跳过，不影响正常回复
-
-安装步骤见 [astrbot/README.md](astrbot/README.md)。核心逻辑只有一份（同一个 SQLite、同一套 SQL），
-DSH 插件和 AstrBot 插件都只是消费者。
+输出是 JSON，方便任何语言调用。安装与配置细节见 [astrbot/README.md](astrbot/README.md)，
+发布到插件的步骤见 [astrbot/MARKETPLACE.md](astrbot/MARKETPLACE.md)。
+核心逻辑只有一份（同一个 SQLite、同一套 SQL），DSH 插件、AstrBot 插件、CLI 都只是消费者。
 
 ## 🛠 设置界面
 

@@ -1,45 +1,69 @@
 # 终身记忆 · AstrBot 插件
 
-给 **NapCat + AstrBot** 这类"对话不经过 DSH"的部署用的薄壳：它不重新实现记忆逻辑，
-只调用 `@tuhengyu/dsh-full-life-memory` 自带的 `flm` CLI，读写同一份 SQLite 线索库。
+给 **NapCat + AstrBot** 这类"对话不经过 DSH"的部署用：把 DSH 终身记忆库里的线索
+注入群聊上下文，让模型在群里也能"想起"之前聊过什么。
+
+**默认不需要 Node**：读取层是纯标准库 `sqlite3`（`memory.py`），装上就能用。
+如果本机有 Node，也可以切到 `flm` CLI（和 DSH 完全同一份实现）。
 
 ```
-QQ 消息 ──► AstrBot ──► 本插件 ──(子进程)──► flm recall ──► memory.db
-                              └─ 命中线索时把"回忆提示"拼进 system_prompt
+QQ 消息 ──► AstrBot ──► 本插件 ──► memory.py（读 SQLite）──► 线索
+                              └─ 命中触发词时拼进 system_prompt
 ```
 
-## 安装
+## 安装（三选一）
 
-1. **装 CLI**（二选一）
-   - 全局安装：`npm i -g @tuhengyu/dsh-full-life-memory`，之后命令是 `flm`
-   - 用源码：`git clone https://github.com/Toctsu/dsh-full-life-memory`，命令写
-     `node /path/to/dsh-full-life-memory/bin/flm.mjs`
+### 1. 从链接安装（推荐，AstrBot 插件页 → 安装插件 → 从链接安装）
 
-2. **放插件**：把本目录（`astrbot/`）复制到 `AstrBot/data/plugins/astrbot_plugin_full_life_memory/`，
-   重启 AstrBot。
+填插件仓库地址，例如：
 
-3. **配置**：WebUI → 插件 → 终身记忆，至少确认：
-   - `cli`：`flm` 或 `node /path/.../bin/flm.mjs`
-   - `db_path`：留空即与 DSH 共享默认库；如果 DSH 那边改过 `dbPath`，这里要写同一个路径
+```
+https://github.com/Toctsu/astrbot_plugin_full_life_memory
+```
 
-4. **验证**：在群里发 `/recall 数据库`，能看到线索就说明通了。
+> 要求仓库**根目录**就是插件（`main.py`、`metadata.yaml` 同级）。
+> 本仓库的 `astrbot/` 目录就是按这个结构组织的。
+
+### 2. 从文件安装
+
+下载 `astrbot_plugin_full_life_memory.zip`（Release 附件），
+在插件页 → 安装插件 → 从文件安装，选中这个 zip。
+
+### 3. 手动放目录
+
+把本目录复制到 `AstrBot/data/plugins/astrbot_plugin_full_life_memory/`，重启 AstrBot。
+
+## 配置
+
+WebUI → 插件 → 终身记忆：
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `backend` | `python` | `python` 内置读取；`cli` 调 `flm`；`auto` 内置失败回退 CLI |
+| `db_path` | 空 | 留空用 `~/.dsh/full-life-memory/memory.db`，要与 DSH 的 `dbPath` 一致 |
+| `scene` | `qqbot` | 场景标识，用于 `user+scene` 隔离 |
+| `isolation` | `user` | `user` 跨群共享；`user+scene` 同场景才共享 |
+| `limit` | 5 | 一次取回几条线索 |
+| `cache_ttl` | 120 | 同一群友两次回忆的最小间隔（秒） |
+| `trigger_words` | 记得/之前/上次… | 命中才回忆 |
+
+`backend=cli` 时还需要：`cli`（`flm` 或 `node /path/bin/flm.mjs`）、`timeout`（默认 4 秒）。
 
 ## 行为
 
-- 只有消息里出现 `trigger_words`（默认：记得 / 还记得 / 之前 / 上次 / 以前 / 那个 / 说过 / 聊过）才回忆
-- 同一个群友 `cache_ttl` 秒内只回忆一次，避免每条消息都起一个 Node 进程
-- CLI 超时（默认 4s）、报错、没有线索 → 静默跳过，正常回复不受影响
-- 注入内容包在 `[记忆线索 · 仅供参考]` 里，并明确要求"不确定就直说记不清，不要编造"
+- 只有命中 `trigger_words` 才查库；同一个群友 120 秒内只查一次
+- 线索包在 `[记忆线索 · 仅供参考]` 里，并要求"不确定就直说记不清，不要编造"
+- 库不存在、SQL 出错、CLI 超时 → 静默跳过，正常回复不受影响
+- 只读：本插件不会写库；写入仍然由 DSH 的自动遗忘完成
 
-## 和 DSH 的关系
+## 验证
 
-- **只读/只写同一张表**，没有任何服务依赖：DSH 没装、没跑都不影响
-- 线索按 `user_id` 隔离（`isolateByUser` 记录的行），查询默认 `scope=auto`：自己的 + 全群共享
-- 想让 AstrBot 也**自动写**线索：目前没做，可以用 `/remember` 命令或后续版本补
+1. 群里发 `/recall 数据库` —— 能看到线索说明读通了
+2. 发一条含"记得"的消息，看 AstrBot 日志有没有 `[full_life_memory] 注入了一条记忆线索`
+3. 没有日志但也不报错：多半是 `db_path` 不对，或库里确实没有匹配的线索
 
 ## 已知限制
 
-- 子进程调用有 100–300ms 开销，所以只做"按需回忆"，不做每条消息都查
-- 触发词是字符串匹配，不看语义；想更激进可以清空 `trigger_words`（每次都查，注意延迟）
-- AstrBot 的 `on_llm_request` 在部分版本里可能改名，装完看日志有没有
-  `[full_life_memory]` 相关报错
+- 触发词是字符串匹配，不看语义
+- 线索按 `user_id` 隔离；如果桥接没有稳定的发送者 ID，只能退化成全群共享
+- 每个场景最多注入一次线索块，不叠加多个关键词的结果
