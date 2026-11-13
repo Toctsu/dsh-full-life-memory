@@ -52,7 +52,7 @@ def _memory_module() -> Any:
     "full_life_memory",
     "tuhengyu",
     "把 DSH 终身记忆的线索注入群聊上下文（纯 Python 读取，无需 Node）",
-    "0.7.2",
+    "0.7.3",
 )
 class FullLifeMemory(Star):
     def __init__(self, context: Context, config: dict[str, Any] | None = None) -> None:
