@@ -98,6 +98,19 @@ try {
   const reopened = await tool.execute({ keyword: 'sqlite' })
   assert.equal(reopened.found, true, 'connection recovers after effect disposal')
 
+  // 时间线：线索按 session_seq 排，不按命中分数或写入顺序
+  mod.rememberClue(dbPath, { keywords: 'timeline 第三', seedTokens: '最后发生的事', sessionSeq: 30, turn: 3 })
+  mod.rememberClue(dbPath, { keywords: 'timeline 第一', seedTokens: '最早发生的事', sessionSeq: 10, turn: 1 })
+  mod.rememberClue(dbPath, { keywords: 'timeline 第二', seedTokens: '中间发生的事', sessionSeq: 20, turn: 2 })
+  const timeline = await tool.execute({ keyword: 'timeline' })
+  const first = timeline.prompt.indexOf('最早发生的事')
+  const second = timeline.prompt.indexOf('中间发生的事')
+  const third = timeline.prompt.indexOf('最后发生的事')
+  assert.ok(first > -1 && second > -1 && third > -1, 'all timeline clues present')
+  assert.ok(first < second && second < third, 'clues are ordered by session_seq, not insert order')
+  assert.ok(timeline.prompt.includes('第1轮') && timeline.prompt.includes('第3轮'), 'turn numbers are rendered')
+  assert.ok(timeline.prompt.includes('按时间从早到晚'), 'prompt tells the model it is a timeline')
+
   // truncation marker appears when the clue set is longer than the budget
   const b = fakeCtx()
   mod.apply(b.ctx, { dbPath, maxPromptChars: 200 })

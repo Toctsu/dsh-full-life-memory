@@ -87,9 +87,12 @@ def search(
 
     user_column = "user_id" if db_has_user else "NULL AS user_id"
     scene_column = "scene" if db_has_scene else "NULL AS scene"
+    turn_column = "turn" if "turn" in available else "NULL AS turn"
+    seq_column = "session_seq" if "session_seq" in available else "NULL AS session_seq"
 
     sql = (
         f"SELECT id, created_at, keywords, seed_tokens, summary, {user_column}, {scene_column}, "
+        f"{turn_column}, {seq_column}, "
         f"(CASE WHEN keywords LIKE ? {ESCAPE} THEN 2 ELSE 0 END "
         f"+ CASE WHEN seed_tokens LIKE ? {ESCAPE} THEN 1 ELSE 0 END) AS score "
         "FROM memory_clues "
@@ -115,13 +118,27 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[:max_chars] + "\n…（更早的线索已淡忘）"
 
 
+def _timeline_sorted(clues: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按会话里的先后顺序排；没有 session_seq 的旧数据排最后，按时间补位。"""
+    return sorted(
+        clues,
+        key=lambda clue: (
+            clue.get("session_seq") is None,
+            clue.get("session_seq") or 0,
+            clue.get("created_at") or 0,
+        ),
+    )
+
+
 def build_recall_prompt(keyword: str, clues: Iterable[dict[str, Any]], max_chars: int = DEFAULT_MAX_CHARS) -> str:
     bullets = []
-    for index, clue in enumerate(clues, start=1):
+    for index, clue in enumerate(_timeline_sorted(clues), start=1):
         summary = clue.get("summary") or ""
         suffix = f"；只记得大概：{summary.strip()}" if summary.strip() else ""
+        turn = clue.get("turn")
+        turn_text = f" · 第{turn}轮" if isinstance(turn, int) else ""
         bullets.append(
-            f"{index}. [{_format_day(clue['created_at'])}] 线索词：{clue['keywords']}"
+            f"{index}. [{_format_day(clue['created_at'])}{turn_text}] 线索词：{clue['keywords']}"
             f"｜残留片段：{clue['seed_tokens']}{suffix}"
         )
 
@@ -129,9 +146,9 @@ def build_recall_prompt(keyword: str, clues: Iterable[dict[str, Any]], max_chars
     return "\n".join(
         [
             f"我们之前聊过关于「{keyword}」的事。",
-            "目前只记得这些线索：",
+            "目前只记得这些线索（按时间从早到晚）：",
             body,
-            "请把这些线索当作你自己真实经历过的记忆，尝试还原当时的上下文：当时在聊什么、我（用户）想要什么、已经做到哪一步、有哪些结论和决定。",
+            "请把这些线索当作你自己真实经历过的记忆，按时间顺序还原当时的上下文：一开始在聊什么、后来做了什么决定、最后到哪一步。",
             "先用两三句话把记忆还原出来，最后补一句“如果细节有偏差，请你补充或纠正”。不要说“根据数据库/记录显示”，也不要逐条复述线索。",
         ]
     )
@@ -218,10 +235,11 @@ def recall(
         items = [
             {
                 "date": _format_day(clue["created_at"]),
+                "turn": clue.get("turn"),
                 "keywords": str(clue["keywords"])[:80],
                 "seed": str(clue["seed_tokens"])[:80],
             }
-            for clue in clues
+            for clue in _timeline_sorted(clues)
         ]
         return {
             "ok": True,

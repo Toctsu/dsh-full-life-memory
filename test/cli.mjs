@@ -73,6 +73,17 @@ try {
   assert.equal(stats.total, 2)
   assert.equal(stats.users, 1)
 
+  // 时间线：按 --seq 排，不按写入顺序
+  run('remember', '--keywords', '时间线 第三', '--seed', '最后的事', '--seq', '30', '--turn', '3', '--db', db)
+  run('remember', '--keywords', '时间线 第一', '--seed', '最早的事', '--seq', '10', '--turn', '1', '--db', db)
+  run('remember', '--keywords', '时间线 第二', '--seed', '中间的事', '--seq', '20', '--turn', '2', '--db', db)
+  const timeline = run('recall', '--keyword', '时间线', '--db', db)
+  assert.equal(timeline.found, true)
+  const order = ['最早的事', '中间的事', '最后的事'].map((text) => timeline.prompt.indexOf(text))
+  assert.ok(order[0] < order[1] && order[1] < order[2], 'clues are ordered by session_seq')
+  assert.ok(timeline.prompt.includes('第1轮'), 'turn numbers are rendered')
+  assert.deepEqual(timeline.items.map((item) => item.turn), [1, 2, 3], 'items carry turns in timeline order')
+
   // 用法错误：非 0 退出 + JSON 错误
   const bad = runFailing('recall', '--db', db)
   assert.equal(bad.code, 2)

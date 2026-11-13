@@ -81,6 +81,7 @@ const DEFAULT_KEEP_TURNS = 4;
  * 线索引擎的全部持久化结构。这里刻意没有 message 正文字段：
  * 一旦存了全文，就等于又把上下文搬回来了。
  * user_id 为空表示“全群共享记忆”（Phase 3 之前写入的历史都落在这里）。
+ * turn / session_seq 记下这条线索在会话里的位置，回忆时按它排成时间线。
  */
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_clues (
@@ -88,6 +89,8 @@ CREATE TABLE IF NOT EXISTS memory_clues (
   session_id  TEXT,
   user_id     TEXT,
   scene       TEXT,
+  turn        INTEGER,
+  session_seq INTEGER,
   created_at  INTEGER NOT NULL,
   keywords    TEXT NOT NULL,
   seed_tokens TEXT NOT NULL,
@@ -97,7 +100,7 @@ CREATE INDEX IF NOT EXISTS memory_clues_created_at ON memory_clues (created_at D
 `;
 const LIKE_ESCAPE = "ESCAPE '\\'";
 /**
- * 旧库平滑升级：0.3.x 的库没有 user_id，0.4.x 的库没有 scene。
+ * 旧库平滑升级：0.3.x 没有 user_id，0.4.x 没有 scene，0.7.x 没有 turn/session_seq。
  * ALTER 前先查 PRAGMA，避免重复执行时报 duplicate column。
  */
 function migrate(db) {
@@ -107,8 +110,13 @@ function migrate(db) {
         db.exec('ALTER TABLE memory_clues ADD COLUMN user_id TEXT');
     if (!has('scene'))
         db.exec('ALTER TABLE memory_clues ADD COLUMN scene TEXT');
+    if (!has('turn'))
+        db.exec('ALTER TABLE memory_clues ADD COLUMN turn INTEGER');
+    if (!has('session_seq'))
+        db.exec('ALTER TABLE memory_clues ADD COLUMN session_seq INTEGER');
     db.exec('CREATE INDEX IF NOT EXISTS memory_clues_user ON memory_clues (user_id, created_at DESC)');
     db.exec('CREATE INDEX IF NOT EXISTS memory_clues_scene ON memory_clues (scene, user_id, created_at DESC)');
+    db.exec('CREATE INDEX IF NOT EXISTS memory_clues_seq ON memory_clues (scene, session_seq)');
 }
 /** LIKE 里 % 和 _ 是通配符，用户关键词里的这两个字符必须转义。 */
 function escapeLike(value) {
@@ -304,9 +312,9 @@ export function storeClue(db, clue) {
         throw new Error('storeClue: keywords 和 seedTokens 都不能为空');
     }
     const result = db
-        .prepare(`INSERT INTO memory_clues (session_id, user_id, scene, created_at, keywords, seed_tokens, summary)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`)
-        .run(clue.sessionId ?? null, clue.userId ?? null, clue.scene ?? null, clue.createdAt ?? Date.now(), keywords, seedTokens, clue.summary ?? null);
+        .prepare(`INSERT INTO memory_clues (session_id, user_id, scene, turn, session_seq, created_at, keywords, seed_tokens, summary)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(clue.sessionId ?? null, clue.userId ?? null, clue.scene ?? null, clue.turn ?? null, clue.sessionSeq ?? null, clue.createdAt ?? Date.now(), keywords, seedTokens, clue.summary ?? null);
     return Number(result.lastInsertRowid);
 }
 /** 便捷入口：自己开库、写入、关库。seed 脚本和 Phase 2 钩子都可以直接用。 */
@@ -345,7 +353,7 @@ export function searchClues(db, keyword, limit, options = {}) {
     }
     const filter = filterParts.length > 0 ? ` AND (${filterParts.join(' OR ')})` : '';
     const rows = db
-        .prepare(`SELECT id, created_at, keywords, seed_tokens, summary, user_id, scene,
+        .prepare(`SELECT id, created_at, keywords, seed_tokens, summary, user_id, scene, turn, session_seq,
               (CASE WHEN keywords    LIKE ? ${LIKE_ESCAPE} THEN 2 ELSE 0 END
              + CASE WHEN seed_tokens LIKE ? ${LIKE_ESCAPE} THEN 1 ELSE 0 END) AS score
          FROM memory_clues
@@ -365,21 +373,34 @@ function truncate(text, maxChars) {
         return text;
     return `${text.slice(0, maxChars)}\n…（更早的线索已淡忘）`;
 }
+/** 按会话里的先后顺序排线索；没有 session_seq 的（旧数据）排在最后，按时间补位。 */
+export function timelineSorted(clues) {
+    return [...clues].sort((left, right) => {
+        const leftSeq = typeof left.session_seq === 'number' ? left.session_seq : Number.POSITIVE_INFINITY;
+        const rightSeq = typeof right.session_seq === 'number' ? right.session_seq : Number.POSITIVE_INFINITY;
+        if (leftSeq !== rightSeq)
+            return leftSeq - rightSeq;
+        return left.created_at - right.created_at;
+    });
+}
 /**
  * 核心：把数据库里的事实重新组装成“回忆”，而不是把数据交给模型。
  * 这就是和 RAG 的分界——检索结果不是证据，是记忆的引子。
+ * 线索按时间线排列，模型照着能讲出“先怎样、然后怎样”。
  */
 export function buildRecallPrompt(keyword, clues, maxChars) {
-    const bullets = clues.map((clue, index) => {
+    const ordered = timelineSorted(clues);
+    const bullets = ordered.map((clue, index) => {
         const summary = clue.summary && clue.summary.trim() !== '' ? `；只记得大概：${clue.summary.trim()}` : '';
-        return `${index + 1}. [${formatDay(clue.created_at)}] 线索词：${clue.keywords}｜残留片段：${clue.seed_tokens}${summary}`;
+        const turn = typeof clue.turn === 'number' ? ` · 第${clue.turn}轮` : '';
+        return `${index + 1}. [${formatDay(clue.created_at)}${turn}] 线索词：${clue.keywords}｜残留片段：${clue.seed_tokens}${summary}`;
     });
     const body = truncate(bullets.join('\n'), maxChars);
     return [
         `我们之前聊过关于「${keyword}」的事。`,
-        '目前只记得这些线索：',
+        '目前只记得这些线索（按时间从早到晚）：',
         body,
-        '请把这些线索当作你自己真实经历过的记忆，尝试还原当时的上下文：当时在聊什么、我（用户）想要什么、已经做到哪一步、有哪些结论和决定。',
+        '请把这些线索当作你自己真实经历过的记忆，按时间顺序还原当时的上下文：一开始在聊什么、后来做了什么决定、最后到哪一步。',
         '先用两三句话把记忆还原出来，最后补一句“如果细节有偏差，请你补充或纠正”。不要说“根据数据库/记录显示”，也不要逐条复述线索。',
     ].join('\n');
 }
@@ -858,6 +879,8 @@ export function installForgettingHook(ctx, readSettings, connection) {
                     sessionId,
                     userId: entry.userId,
                     scene,
+                    turn: span.turns[0] ?? null,
+                    sessionSeq: span.startSeq,
                     keywords: entry.clue.keywords,
                     seedTokens: entry.clue.seedTokens,
                     summary: entry.clue.summary,
@@ -956,8 +979,8 @@ export function apply(ctx, config) {
         description: 'Recall an earlier conversation from the clues kept when its details were forgotten. ' +
             'Use it when the user refers to something you have no context for ("as we discussed", "that project from last week", a name you do not recognize), ' +
             'or when a topic feels familiar but the specifics are gone. ' +
-            'Returns a memory prompt assembled from clue words and leftover fragments: read it as your own recollection and reconstruct what was going on, ' +
-            'rather than quoting it as a record. Call once per clue, starting with the most distinctive word the user just used. ' +
+            'Returns a memory prompt assembled from clue words and leftover fragments, ordered as a timeline: read it as your own recollection and reconstruct what was going on ' +
+            '(what was decided first, what changed later), rather than quoting it as a record. Call once per clue, starting with the most distinctive word the user just used. ' +
             'In a group chat, results are scoped to the current speaker by default; pass scope "global" to search memories shared by the whole group.',
         parameters: {
             type: 'object',

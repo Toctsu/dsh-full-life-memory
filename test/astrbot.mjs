@@ -76,6 +76,17 @@ try {
   assert.ok(Array.isArray(exact.items) && exact.items.length > 0)
   assert.ok(exact.items[0].date && exact.items[0].keywords)
 
+  // 时间线：Python 侧也要按 session_seq 排
+  const tlDb = join(dir, 'timeline.db')
+  runNode('remember', '--keywords', '时间线 第三', '--seed', '最后的事', '--seq', '30', '--turn', '3', '--db', tlDb)
+  runNode('remember', '--keywords', '时间线 第一', '--seed', '最早的事', '--seq', '10', '--turn', '1', '--db', tlDb)
+  runNode('remember', '--keywords', '时间线 第二', '--seed', '中间的事', '--seq', '20', '--turn', '2', '--db', tlDb)
+  const tl = runPy('recall', '--keyword', '时间线', '--db', tlDb)
+  const tlOrder = ['最早的事', '中间的事', '最后的事'].map((text) => tl.prompt.indexOf(text))
+  assert.ok(tlOrder[0] < tlOrder[1] && tlOrder[1] < tlOrder[2], 'python prompt is timeline-ordered')
+  assert.ok(tl.prompt.includes('第1轮'), 'python prompt shows turn numbers')
+  assert.deepEqual(tl.items.map((item) => item.turn), [1, 2, 3])
+
   // 库不存在时：不创建文件，直接返回空
   const missing = join(dir, 'missing.db')
   const empty = runPy('recall', '--text', '数据库', '--db', missing)

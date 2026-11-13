@@ -14,7 +14,7 @@
  */
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { openDb, searchClues, storeClue, buildRecallPrompt } from '../index.js'
+import { openDb, searchClues, storeClue, buildRecallPrompt, timelineSorted } from '../index.js'
 
 const EMPTY_PROMPT = (keyword) =>
   [
@@ -114,6 +114,8 @@ try {
       userId: userId ?? null,
       scene: scene ?? null,
       sessionId: typeof args.session === 'string' ? args.session : null,
+      turn: Number.isFinite(Number(args.turn)) ? Number(args.turn) : null,
+      sessionSeq: Number.isFinite(Number(args.seq)) ? Number(args.seq) : null,
     })
     process.stdout.write(`${JSON.stringify({ ok: true, id })}\n`)
     process.exit(0)
@@ -147,8 +149,9 @@ try {
       ? buildRecallPrompt(keyword, clues, Number(args['max-chars']) || 1800)
       : EMPTY_PROMPT(keyword)
 
-  const items = clues.map((clue) => ({
+  const items = timelineSorted(clues).map((clue) => ({
     date: new Date(clue.created_at).toISOString().slice(0, 10),
+    turn: clue.turn ?? null,
     keywords: String(clue.keywords).slice(0, 80),
     seed: String(clue.seed_tokens).slice(0, 80),
   }))

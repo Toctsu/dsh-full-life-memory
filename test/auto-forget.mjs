@@ -140,7 +140,9 @@ function rows(database) {
   if (!existsSync(database)) return []
   const db = new DatabaseSync(database)
   try {
-    return db.prepare('select id, session_id, keywords, seed_tokens, summary from memory_clues order by id').all()
+    return db
+      .prepare('select id, session_id, turn, session_seq, keywords, seed_tokens, summary from memory_clues order by id')
+      .all()
   } finally {
     db.close()
   }
@@ -266,6 +268,8 @@ try {
     assert.match(stored[0].keywords, /recall_from_clues/)
     assert.ok(stored[0].seed_tokens.length > 0)
     assert.ok(stored[0].summary.length > 0)
+    assert.equal(stored[0].turn, 1, 'clue records the first turn of the folded span')
+    assert.equal(typeof stored[0].session_seq, 'number', 'clue records its surface position for the timeline')
 
     // 同一轮再触发：不再切（每轮最多一次）
     const afterFirst = session.surface.nodes.length
