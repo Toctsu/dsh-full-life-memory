@@ -8,7 +8,7 @@
 像人一样遗忘，也像人一样回忆。</p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-0.7.1-6d5efc?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.7.2-6d5efc?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-1fc8b3?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/node-%E2%89%A5%2024-339933?style=flat-square&logo=node.js&logoColor=white" alt="node" />
   <img src="https://img.shields.io/badge/dependencies-0-52525b?style=flat-square" alt="zero dependencies" />
@@ -238,6 +238,8 @@ QQ 消息 ──► AstrBot ──► astrbot/ 插件 ──► memory.py (sqlit
 
 配置里把 `db_path` 指到 DSH 用的同一个库即可（留空默认 `~/.dsh/full-life-memory/memory.db`）。
 命中触发词（记得 / 上次 / 之前…）时回忆一次并注入 `system_prompt`，同一个群友 120 秒内只查一次。
+默认 `isolation: user+scene`：QQ 群只回忆 QQ 群的事，桌面工作记忆不会被召回。
+`/recall` 是管理员命令，精确匹配并只返回线索摘要。
 
 也可以用 **`flm` CLI** 自己接别的平台：
 

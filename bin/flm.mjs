@@ -69,7 +69,8 @@ function candidatesFromText(text) {
 
   for (const run of runs) {
     push(run)
-    for (let size = Math.min(6, run.length); size >= 2; size -= 1) {
+    // 只从长句里切 3 字以上的片段：2 字片段（数据/信息）太泛，容易误召回
+    for (let size = Math.min(6, run.length); size >= 3; size -= 1) {
       for (let start = 0; start + size <= run.length; start += 1) push(run.slice(start, start + size))
     }
   }
@@ -146,8 +147,14 @@ try {
       ? buildRecallPrompt(keyword, clues, Number(args['max-chars']) || 1800)
       : EMPTY_PROMPT(keyword)
 
+  const items = clues.map((clue) => ({
+    date: new Date(clue.created_at).toISOString().slice(0, 10),
+    keywords: String(clue.keywords).slice(0, 80),
+    seed: String(clue.seed_tokens).slice(0, 80),
+  }))
+
   process.stdout.write(
-    `${JSON.stringify({ ok: true, found: clues.length > 0, keyword, count: clues.length, prompt })}\n`,
+    `${JSON.stringify({ ok: true, found: clues.length > 0, keyword, count: clues.length, items, prompt })}\n`,
   )
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error), 1)

@@ -1,6 +1,6 @@
 name: astrbot_plugin_full_life_memory
 display_name: 终身记忆（DSH 线索）
 desc: 把 DSH 终身记忆库里的线索注入群聊上下文，让 AstrBot 也能"想起"之前聊过什么
-version: 0.7.1
+version: 0.7.2
 author: tuhengyu
 repo: https://github.com/Toctsu/astrbot_plugin_full_life_memory

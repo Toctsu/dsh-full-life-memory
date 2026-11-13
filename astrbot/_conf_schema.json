@@ -16,8 +16,8 @@
   },
   "isolation": {
     "type": "string",
-    "default": "user",
-    "description": "user = 同一个人跨群共享；user+scene = 同一个场景内才共享（更严格）。"
+    "default": "user+scene",
+    "description": "user+scene = 默认，只在同一场景内共享（QQ 群不会召回桌面工作记忆）；user = 同一个人跨群共享。"
   },
   "limit": {
     "type": "int",

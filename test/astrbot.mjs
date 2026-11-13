@@ -64,6 +64,18 @@ try {
   assert.equal(pyStats.total, nodeStats.total)
   assert.equal(pyStats.users, nodeStats.users)
 
+  // 泛词不再触发降级匹配：库里只有「感知数据」，问「数据库」不应命中
+  const noiseDb = join(dir, 'noise.db')
+  runNode('remember', '--keywords', '感知数据,MUD', '--seed', '文字 MUD 的感知数据', '--db', noiseDb)
+  const noisy = runPy('recall', '--text', '数据库', '--db', noiseDb, '--user', '10001', '--scene', 'qqbot')
+  assert.equal(noisy.found, false, '2-char fallback removed: 数据库 must not match 感知数据')
+  const exact = runPy('recall', '--keyword', '数据', '--db', noiseDb, '--user', '10001', '--scene', 'qqbot')
+  assert.equal(exact.found, true, 'exact keyword still works')
+
+  // 摘要用的 items 字段
+  assert.ok(Array.isArray(exact.items) && exact.items.length > 0)
+  assert.ok(exact.items[0].date && exact.items[0].keywords)
+
   // 库不存在时：不创建文件，直接返回空
   const missing = join(dir, 'missing.db')
   const empty = runPy('recall', '--text', '数据库', '--db', missing)

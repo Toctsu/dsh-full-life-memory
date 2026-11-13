@@ -7,6 +7,7 @@
 - 每个群友 2 分钟内最多回忆一次，避免每条消息都查库
 - 任何异常（库不存在、CLI 超时）都静默跳过，绝不影响正常回复
 - 旧版库（0.3.x，缺 user_id/scene）会自动补列，不用手动迁移
+- `/recall` 只给管理员用，返回线索摘要而不是模型提示词
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ def _memory_module() -> Any:
     "full_life_memory",
     "tuhengyu",
     "把 DSH 终身记忆的线索注入群聊上下文（纯 Python 读取，无需 Node）",
-    "0.7.1",
+    "0.7.2",
 )
 class FullLifeMemory(Star):
     def __init__(self, context: Context, config: dict[str, Any] | None = None) -> None:
@@ -72,7 +73,8 @@ class FullLifeMemory(Star):
         return os.path.join(os.path.expanduser("~"), ".dsh", "full-life-memory", "memory.db")
 
     def _isolation(self) -> str:
-        return "user+scene" if str(self._cfg("isolation", "user")) == "user+scene" else "user"
+        # 默认按场景隔离：QQ 群只回忆 QQ 群的事，桌面工作记忆留在桌面
+        return "user" if str(self._cfg("isolation", "user+scene")) == "user" else "user+scene"
 
     def _command(self) -> list[str]:
         raw = str(self._cfg("cli", "flm")).strip()
@@ -97,21 +99,33 @@ class FullLifeMemory(Star):
         user = self._call(event, "get_sender_id", "get_sender_id_str")
         return group, user
 
+    @staticmethod
+    def _is_admin(event: Any) -> bool:
+        fn = getattr(event, "is_admin", None)
+        if callable(fn):
+            try:
+                return bool(fn())
+            except Exception:
+                return False
+        # 老版本没有权限 API：不拦，避免命令直接不可用
+        return True
+
     # ------------------------------------------------------------ 两种后端
-    def _recall_python(self, text: str, user: str) -> str:
+    def _lookup_python(self, text: str, user: str, exact: bool) -> dict[str, Any]:
         module = _memory_module()
         db_path = self._db_path()
 
         def query() -> dict[str, Any]:
-            return module.recall(
-                db_path,
-                text=text,
-                user_id=user or None,
-                scene=str(self._cfg("scene", "qqbot")),
-                limit=int(self._cfg("limit", 5)),
-                isolation=self._isolation(),
-                scope="auto",
-            )
+            common = {
+                "user_id": user or None,
+                "scene": str(self._cfg("scene", "qqbot")),
+                "limit": int(self._cfg("limit", 5)),
+                "isolation": self._isolation(),
+                "scope": "auto",
+            }
+            if exact:
+                return module.recall(db_path, keyword=text, **common)
+            return module.recall(db_path, text=text, **common)
 
         result = query()
 
@@ -129,17 +143,19 @@ class FullLifeMemory(Star):
                         "可运行 python memory.py migrate --db <库路径>"
                     )
 
-        return str(result.get("prompt") or "") if result.get("found") else ""
+        return result
 
-    async def _recall_cli(self, text: str, user: str) -> str:
+    async def _lookup_cli(self, text: str, user: str, exact: bool) -> dict[str, Any]:
         args = [
             "recall",
-            "--text",
+            "--keyword" if exact else "--text",
             text[:200],
             "--scene",
             str(self._cfg("scene", "qqbot")),
             "--limit",
             str(self._cfg("limit", 5)),
+            "--isolation",
+            self._isolation(),
         ]
         if user:
             args += ["--user", user]
@@ -165,20 +181,39 @@ class FullLifeMemory(Star):
             detail = stderr.decode("utf-8", "ignore").strip() or f"exit {proc.returncode}"
             raise RuntimeError(detail)
 
-        result = json.loads(stdout.decode("utf-8", "ignore") or "{}")
-        return str(result.get("prompt") or "") if result.get("found") else ""
+        return json.loads(stdout.decode("utf-8", "ignore") or "{}")
 
-    async def _recall(self, text: str, user: str) -> str:
+    async def _lookup(self, text: str, user: str, exact: bool = False) -> dict[str, Any]:
         backend = str(self._cfg("backend", "python")).lower()
         if backend == "cli":
-            return await self._recall_cli(text, user)
+            return await self._lookup_cli(text, user, exact)
         try:
-            return self._recall_python(text, user)
+            return self._lookup_python(text, user, exact)
         except Exception as exc:
             logger.warning(f"[full_life_memory] 内置读取失败：{exc}")
             if backend == "auto":
-                return await self._recall_cli(text, user)
-            return ""
+                return await self._lookup_cli(text, user, exact)
+            return {"ok": False, "found": False, "count": 0, "items": []}
+
+    # ------------------------------------------------------------ 两种输出
+    async def _recall(self, text: str, user: str) -> str:
+        result = await self._lookup(text, user, exact=False)
+        return str(result.get("prompt") or "") if result.get("found") else ""
+
+    async def _digest(self, keyword: str, user: str) -> str:
+        """给管理员看的摘要：只列线索，不贴模型提示词。"""
+        result = await self._lookup(keyword, user, exact=True)
+        items = result.get("items") or []
+        if not items:
+            return f"关于「{keyword}」，我这边没有线索。"
+
+        lines = [f"「{keyword}」找到 {len(items)} 条线索："]
+        for index, item in enumerate(items[:5], start=1):
+            date = str(item.get("date") or "")
+            keywords = str(item.get("keywords") or "")
+            seed = str(item.get("seed") or "")
+            lines.append(f"{index}. [{date}] {keywords}｜{seed}")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------ 注入钩子
     @filter.on_llm_request()
@@ -217,20 +252,24 @@ class FullLifeMemory(Star):
         except Exception as exc:  # 任何失败都不影响正常回复
             logger.warning(f"[full_life_memory] 回忆跳过：{exc}")
 
-    # ------------------------------------------------------------ 手动命令
+    # ------------------------------------------------------------ 管理员命令
     @filter.command("recall")
     async def recall_command(self, event: AstrMessageEvent):
-        """用法：/recall 关键词"""
+        """用法：/recall 关键词（仅管理员）"""
         try:
+            if not self._is_admin(event):
+                yield event.plain_result("这个命令仅管理员可用。")
+                return
+
             text = str(getattr(event, "message_str", "") or "").strip()
             parts = text.split(maxsplit=1)
             keyword = parts[1].strip() if len(parts) > 1 else ""
             if not keyword:
-                yield event.plain_result("用法：/recall 关键词")
+                yield event.plain_result("用法：/recall 关键词（精确匹配）")
                 return
+
             _, user = self._identities(event)
-            prompt = await self._recall(keyword, user)
-            yield event.plain_result(prompt or f"关于「{keyword}」，我这边没有线索。")
+            yield event.plain_result(await self._digest(keyword, user))
         except Exception as exc:
             logger.warning(f"[full_life_memory] /recall 失败：{exc}")
             yield event.plain_result("回忆暂时不可用，请稍后再试。")

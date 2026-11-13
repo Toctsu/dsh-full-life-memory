@@ -164,7 +164,9 @@ def candidates_from_text(text: str) -> list[str]:
 
     for run in runs:
         push(run)
-        for size in range(min(6, len(run)), 1, -1):
+        # 只从长句里切 3 字以上的片段：2 字片段（数据/信息/东西）太泛，
+        # 会把不相干的线索全部召回来
+        for size in range(min(6, len(run)), 2, -1):
             for start in range(0, len(run) - size + 1):
                 push(run[start : start + size])
 
@@ -213,12 +215,21 @@ def recall(
                 word = text.strip()[:24]
 
         prompt = build_recall_prompt(word, clues, max_chars) if clues else empty_prompt(word)
+        items = [
+            {
+                "date": _format_day(clue["created_at"]),
+                "keywords": str(clue["keywords"])[:80],
+                "seed": str(clue["seed_tokens"])[:80],
+            }
+            for clue in clues
+        ]
         return {
             "ok": True,
             "found": bool(clues),
             "keyword": word,
             "count": len(clues),
             "schema": schema,
+            "items": items,
             "prompt": prompt,
         }
     finally:
